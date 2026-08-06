@@ -1,0 +1,2358 @@
+<!DOCTYPE html>
+<!--
+============================================================
+ONE-TIME SUPABASE SETUP
+------------------------------------------------------------
+This whole app is a single file, but Supabase still needs its
+tables created before the app has anywhere to read/write data.
+That's a one-time step you do in Supabase itself (a web page
+can't run this from inside the browser).
+
+HOW TO RUN IT:
+1. Open your Supabase project -> SQL Editor -> New query.
+2. Copy everything between the START/END markers below and
+   paste it into the SQL Editor.
+3. Click Run. (Safe to run more than once.)
+4. Open this HTML file in a browser - it's already configured
+   with your project URL and public key further down.
+============================================================
+
+-- ============ START: SUPABASE SETUP SQL ============
+-- ============================================================
+-- Ambition Tradelink — Quotation Management
+-- Supabase schema + seed data
+-- Run this once in Supabase → SQL Editor → New query → Run
+-- ============================================================
+
+-- ---------- USERS ----------
+create table if not exists users (
+  id text primary key,
+  username text unique not null,
+  password text not null,
+  role text not null,
+  status text not null default 'active'
+);
+
+-- ---------- ITEM MASTER ----------
+create table if not exists item_master (
+  id text primary key,
+  part_code text not null,
+  description text not null,
+  category text,
+  status text not null default 'active'
+);
+
+-- ---------- PRICE LISTS ----------
+create table if not exists price_lists (
+  id text primary key,
+  name text not null,
+  status text not null default 'active',
+  created date,
+  lp jsonb not null default '{}'::jsonb   -- { itemId: price, ... }
+);
+
+-- ---------- GST RATES ----------
+create table if not exists gst_rates (
+  id text primary key,
+  label text not null,
+  rate numeric not null default 0,
+  is_default boolean not null default false
+);
+
+-- ---------- TERMS & CONDITIONS ----------
+create table if not exists terms (
+  id text primary key,
+  text text not null,
+  enabled boolean not null default true,
+  sort_order integer not null default 0
+);
+
+-- ---------- QUOTATIONS ----------
+create table if not exists quotations (
+  id text primary key,
+  number text not null,
+  party text not null,
+  date date not null,
+  price_list_id text references price_lists(id) on delete set null,
+  gst_id text references gst_rates(id) on delete set null,
+  status text not null default 'draft',
+  items jsonb not null default '[]'::jsonb,   -- array of line items
+  terms jsonb not null default '[]'::jsonb    -- array of enabled term ids
+);
+
+-- ---------- APP META (counters etc.) ----------
+create table if not exists app_meta (
+  id text primary key,
+  next_quote_seq integer not null default 1003
+);
+
+-- ============================================================
+-- Row Level Security
+-- ------------------------------------------------------------
+-- IMPORTANT SECURITY NOTE:
+-- This app authenticates with its own "users" table and a
+-- publishable (anon) API key, not Supabase Auth. The anon key
+-- is visible to anyone who views the page source. The policies
+-- below allow that anon key full read/write access to every
+-- table (matching the app's current "anyone with the app can
+-- edit everything" behavior) — including reading the users
+-- table, which currently stores plaintext passwords.
+--
+-- This is fine for a private/internal tool that only you and
+-- your team can reach, but do NOT treat it as secure against a
+-- motivated outsider: anyone with your URL + anon key could
+-- query the database directly (bypassing the login screen) and
+-- read every row, including passwords. If this ever becomes
+-- public-facing, switch to real Supabase Auth + per-user RLS.
+-- ============================================================
+
+alter table users enable row level security;
+alter table item_master enable row level security;
+alter table price_lists enable row level security;
+alter table gst_rates enable row level security;
+alter table terms enable row level security;
+alter table quotations enable row level security;
+alter table app_meta enable row level security;
+
+create policy "anon full access" on users for all using (true) with check (true);
+create policy "anon full access" on item_master for all using (true) with check (true);
+create policy "anon full access" on price_lists for all using (true) with check (true);
+create policy "anon full access" on gst_rates for all using (true) with check (true);
+create policy "anon full access" on terms for all using (true) with check (true);
+create policy "anon full access" on quotations for all using (true) with check (true);
+create policy "anon full access" on app_meta for all using (true) with check (true);
+
+-- Supabase's public API connects as the "anon" role. Tables created via
+-- the SQL Editor (unlike the Table Editor UI) don't automatically grant
+-- it access, so without this you'll get a 401 "permission denied" error.
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to anon, authenticated;
+alter default privileges in schema public
+  grant select, insert, update, delete on tables to anon, authenticated;
+
+-- ============================================================
+-- Seed data (same starting data the app used to ship with)
+-- Safe to re-run: uses ON CONFLICT DO NOTHING.
+-- ============================================================
+
+insert into users (id, username, password, role, status) values
+  ('u1', 'admin',  'admin123', 'admin', 'active'),
+  ('u2', 'rakesh', 'user123',  'user',  'active')
+on conflict (id) do nothing;
+
+insert into item_master (id, part_code, description, category, status) values
+  ('i1',  'MCB-1P-6A',   'Single Pole MCB 6A C-Curve',       'MCB',        'active'),
+  ('i2',  'MCB-1P-16A',  'Single Pole MCB 16A C-Curve',      'MCB',        'active'),
+  ('i3',  'MCB-3P-32A',  'Triple Pole MCB 32A C-Curve',      'MCB',        'active'),
+  ('i4',  'MCCB-63A',    'MCCB 63A 25kA TP',                 'MCCB',       'active'),
+  ('i5',  'MCCB-125A',   'MCCB 125A 35kA TP',                'MCCB',       'active'),
+  ('i6',  'CB-2P-25A',   'Isolator / Changeover 2P 25A',     'Isolator',   'active'),
+  ('i7',  'CU-4W-8M',    'MCB Distribution Board 8-way 4W',  'DB',         'active'),
+  ('i8',  'CU-8W-12M',   'MCB Distribution Board 12-way 8W', 'DB',         'active'),
+  ('i9',  'CBL-CU-2.5',  'Copper Wire 2.5 sq.mm (90m coil)', 'Cable',      'active'),
+  ('i10', 'CBL-CU-4.0',  'Copper Wire 4.0 sq.mm (90m coil)', 'Cable',      'active'),
+  ('i11', 'SKT-6A-1G',   '6A Modular Socket, 1 Gang',        'Switchgear', 'active'),
+  ('i12', 'SW-6A-1G',    '6A Modular Switch, 1 Gang',        'Switchgear', 'active'),
+  ('i13', 'ELCB-40A',    'ELCB 40A 30mA DP',                 'ELCB',       'active'),
+  ('i14', 'CONT-32A',    'Contactor 32A 3P Coil 230V',       'Contactor',  'active'),
+  ('i15', 'TB-LED-20W',  'LED Tube Batten 20W 4ft',          'Lighting',   'active')
+on conflict (id) do nothing;
+
+insert into price_lists (id, name, status, created, lp) values
+  ('pl1', 'Price List 2024', 'archived', '2024-01-05',
+    '{"i1":65,"i2":78,"i3":410,"i4":2450,"i5":4200,"i6":320,"i7":1450,"i8":2200,"i9":1650,"i10":2450,"i11":95,"i12":85,"i13":850,"i14":1250,"i15":420}'::jsonb),
+  ('pl2', 'Price List 2025', 'active', '2025-01-10',
+    '{"i1":72,"i2":86,"i3":455,"i4":2680,"i5":4550,"i6":350,"i7":1580,"i8":2400,"i9":1780,"i10":2650,"i11":105,"i12":95,"i13":920,"i14":1360,"i15":460}'::jsonb),
+  ('pl3', 'Price List April 2026', 'active', '2026-04-01',
+    '{"i1":79,"i2":94,"i3":495,"i4":2890,"i5":4900,"i6":380,"i7":1690,"i8":2600,"i9":1920,"i10":2850,"i11":115,"i12":105,"i13":990,"i14":1470,"i15":495}'::jsonb)
+on conflict (id) do nothing;
+
+insert into gst_rates (id, label, rate, is_default) values
+  ('g0',  'No GST', 0,  false),
+  ('g5',  '5%',     5,  false),
+  ('g12', '12%',    12, false),
+  ('g18', '18%',    18, true)
+on conflict (id) do nothing;
+
+insert into terms (id, text, enabled, sort_order) values
+  ('t1', '18% GST Extra',                             true,  1),
+  ('t2', 'Prices are Ex-Works',                        true,  2),
+  ('t3', 'Freight Extra',                              true,  3),
+  ('t4', 'Advance Payment Required',                   true,  4),
+  ('t5', 'Delivery Subject to Stock',                  true,  5),
+  ('t6', 'Material Once Sold Will Not Be Taken Back',  true,  6),
+  ('t7', 'Warranty As Per Manufacturer',               true,  7),
+  ('t8', 'Transportation Extra',                       false, 8),
+  ('t9', 'Packing Charges Extra',                      false, 9)
+on conflict (id) do nothing;
+
+insert into quotations (id, number, party, date, price_list_id, gst_id, status, items, terms) values
+  ('q1', 'QTN-1001', 'Shree Electricals', '2026-07-10', 'pl3', 'g18', 'saved',
+    '[{"itemId":"i4","partCode":"MCCB-63A","description":"MCCB 63A 25kA TP","category":"MCCB","lp":2890,"qty":4,"discount":10},
+      {"itemId":"i7","partCode":"CU-4W-8M","description":"MCB Distribution Board 8-way 4W","category":"DB","lp":1690,"qty":6,"discount":5}]'::jsonb,
+    '["t1","t2","t3","t5"]'::jsonb),
+  ('q2', 'QTN-1002', 'Om Trading Co.', '2026-07-16', 'pl3', 'g12', 'saved',
+    '[{"itemId":"i9","partCode":"CBL-CU-2.5","description":"Copper Wire 2.5 sq.mm (90m coil)","category":"Cable","lp":1920,"qty":10,"discount":8},
+      {"itemId":"i11","partCode":"SKT-6A-1G","description":"6A Modular Socket, 1 Gang","category":"Switchgear","lp":115,"qty":40,"discount":0}]'::jsonb,
+    '["t2","t4","t7"]'::jsonb)
+on conflict (id) do nothing;
+
+insert into app_meta (id, next_quote_seq) values ('app', 1003)
+on conflict (id) do nothing;
+-- ============ END: SUPABASE SETUP SQL ============
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ambition Tradelink — Quotation Management</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ==========================================================
+   Ambition Tradelink — Quotation Management
+   Design tokens
+   ========================================================== */
+:root{
+  --bg:#F5F6F8;
+  --bg-elevated:#FFFFFF;
+  --bg-sunken:#EDEFF3;
+  --text:#171E27;
+  --text-muted:#5C6B79;
+  --text-faint:#93A1AE;
+  --border:#E2E6EB;
+  --border-strong:#CBD2D9;
+
+  --copper:#BE6A34;
+  --copper-dark:#9A5426;
+  --copper-tint:#F4E3D4;
+  --blue:#2A5FD9;
+  --blue-tint:#E3EAFC;
+
+  --success:#1F8A54;
+  --success-tint:#E1F4EA;
+  --danger:#C6412E;
+  --danger-tint:#FBE6E2;
+
+  --radius-sm:6px;
+  --radius:10px;
+  --radius-lg:16px;
+  --shadow-sm:0 1px 2px rgba(23,30,39,.06);
+  --shadow-md:0 6px 20px rgba(23,30,39,.10);
+  --shadow-lg:0 16px 40px rgba(23,30,39,.16);
+
+  --font-display:'Space Grotesk', sans-serif;
+  --font-body:'Inter', sans-serif;
+  --font-mono:'JetBrains Mono', monospace;
+
+  --sidebar-w:248px;
+  color-scheme: light;
+}
+
+body.dark{
+  --bg:#0E141C;
+  --bg-elevated:#161F2B;
+  --bg-sunken:#0B1017;
+  --text:#E9EEF3;
+  --text-muted:#95A5B5;
+  --text-faint:#5D6C7B;
+  --border:#243040;
+  --border-strong:#324256;
+
+  --copper:#E08A47;
+  --copper-tint:#3A2A1C;
+  --blue:#6E93F5;
+  --blue-tint:#182746;
+
+  --success:#3FC080;
+  --success-tint:#123526;
+  --danger:#E5695A;
+  --danger-tint:#3B1B18;
+  color-scheme: dark;
+}
+
+*{box-sizing:border-box;}
+html,body{height:100%;}
+[hidden]{ display:none !important; }
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--font-body);
+  font-size:14px;
+  -webkit-font-smoothing:antialiased;
+  transition:background .2s ease, color .2s ease;
+}
+h1,h2,h3{font-family:var(--font-display); margin:0; letter-spacing:-.01em;}
+button{font-family:inherit;}
+input,select{font-family:inherit;}
+::selection{background:var(--copper-tint); color:var(--copper-dark);}
+
+/* ==================== BUTTONS ==================== */
+.btn{
+  appearance:none; border:1px solid transparent; border-radius:var(--radius-sm);
+  padding:9px 16px; font-size:13.5px; font-weight:600; cursor:pointer;
+  display:inline-flex; align-items:center; gap:6px; white-space:nowrap;
+  transition:transform .08s ease, background .15s ease, border-color .15s ease;
+}
+.btn:active{transform:translateY(1px);}
+.btn-primary{background:var(--copper); color:#fff;}
+.btn-primary:hover{background:var(--copper-dark);}
+.btn-secondary{background:var(--bg-sunken); color:var(--text); border-color:var(--border);}
+.btn-secondary:hover{border-color:var(--border-strong);}
+.btn-outline{background:transparent; color:var(--text); border-color:var(--border-strong);}
+.btn-outline:hover{background:var(--bg-sunken);}
+.btn-ghost{background:transparent; color:var(--text-muted); border-color:transparent;}
+.btn-ghost:hover{color:var(--text); background:var(--bg-sunken);}
+.btn-danger{background:var(--danger); color:#fff;}
+.btn-danger:hover{filter:brightness(.92);}
+.btn-block{width:100%; justify-content:center;}
+.btn-sm{padding:6px 12px; font-size:12.5px;}
+.file-btn{position:relative;}
+
+/* ==================== LOGIN ==================== */
+.login-screen{
+  min-height:100vh; display:flex; align-items:center; justify-content:center;
+  background:
+    radial-gradient(circle at 12% 15%, rgba(255,152,64,.30) 0%, transparent 42%),
+    radial-gradient(circle at 88% 85%, rgba(198,65,46,.30) 0%, transparent 45%),
+    linear-gradient(135deg, #fff3e9 0%, var(--bg-sunken) 55%, #fbe6e2 100%);
+  position:relative; overflow:hidden;
+}
+body.dark .login-screen{
+  background:
+    radial-gradient(circle at 12% 15%, rgba(224,138,71,.20) 0%, transparent 42%),
+    radial-gradient(circle at 88% 85%, rgba(229,105,90,.20) 0%, transparent 45%),
+    linear-gradient(135deg, #1c130c 0%, var(--bg-sunken) 55%, #22120f 100%);
+}
+.login-trace{position:absolute; inset:0; opacity:.5; pointer-events:none;}
+.trace-line{fill:none; stroke:var(--copper); opacity:.25; stroke-width:2;}
+.trace-line-2{stroke:var(--danger); opacity:.30;}
+.trace-node{fill:var(--danger);}
+.login-card{
+  position:relative; z-index:1;
+  width:380px; max-width:92vw; background:var(--bg-elevated);
+  border:1px solid var(--border); border-radius:var(--radius-lg);
+  padding:36px 32px; box-shadow:var(--shadow-lg), 0 0 0 1px rgba(190,106,52,.06);
+}
+.brand{display:flex; align-items:center; gap:10px; margin-bottom:22px;}
+.brand-name{font-family:var(--font-display); font-weight:700; font-size:16px; line-height:1.1;}
+.brand-sub{font-size:11.5px; color:var(--text-muted); letter-spacing:.03em;}
+.login-card .brand{
+  flex-direction:column; justify-content:center; text-align:center;
+  gap:2px; margin-bottom:22px;
+}
+.login-card .brand-name{font-size:22px;}
+.login-card .brand-sub{margin-top:2px;}
+.login-card h1{font-size:22px; margin-bottom:4px;}
+.login-hint{color:var(--text-muted); font-size:13px; margin:0 0 18px;}
+#loginForm label{display:block; font-size:12.5px; font-weight:600; color:var(--text-muted); margin-bottom:12px;}
+#loginForm input{
+  display:block; width:100%; margin-top:6px; padding:10px 12px; border-radius:var(--radius-sm);
+  border:1px solid var(--border-strong); background:var(--bg); color:var(--text); font-size:14px;
+}
+#loginForm input:focus{outline:2px solid var(--copper); outline-offset:1px;}
+.field-error{color:var(--danger); font-size:12.5px; margin:-4px 0 12px;}
+.demo-accounts{margin-top:16px; display:flex; flex-direction:column; gap:8px;}
+.demo-chip{
+  border:1px dashed var(--border-strong); background:transparent; color:var(--text-muted);
+  font-size:12px; font-family:var(--font-mono); padding:8px 10px; border-radius:var(--radius-sm);
+  cursor:pointer; text-align:left;
+}
+.demo-chip:hover{border-color:var(--copper); color:var(--copper);}
+
+/* ==================== APP SHELL ==================== */
+.app{display:flex; min-height:100vh;}
+.sidebar{
+  width:var(--sidebar-w); flex:none; background:var(--bg-elevated); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; position:sticky; top:0; height:100vh; z-index:20;
+}
+.brand-sidebar{padding:20px; border-bottom:1px solid var(--border);}
+.nav{flex:1; overflow-y:auto; padding:14px 12px;}
+.nav-group-label{font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); font-weight:700; margin:16px 10px 6px;}
+.nav-group-label:first-child{margin-top:0;}
+.nav-item{
+  display:flex; align-items:center; gap:10px; width:100%; text-align:left;
+  padding:9px 10px; border-radius:var(--radius-sm); background:transparent; border:1px solid transparent;
+  color:var(--text-muted); font-size:13.5px; font-weight:500; cursor:pointer; margin-bottom:2px;
+  position:relative;
+}
+.nav-item:hover{background:var(--bg-sunken); color:var(--text);}
+.nav-item.active{background:var(--copper-tint); color:var(--copper-dark); font-weight:600;}
+body.dark .nav-item.active{color:var(--copper);}
+.nav-item.active::before{
+  content:""; position:absolute; left:-12px; top:50%; transform:translateY(-50%);
+  width:4px; height:16px; border-radius:2px; background:var(--copper);
+}
+.nav-item i{width:16px; height:16px; flex:none; display:inline-block;}
+.sidebar-footer{padding:14px; border-top:1px solid var(--border);}
+.theme-toggle{
+  width:100%; display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:var(--radius-sm);
+  background:var(--bg-sunken); border:1px solid var(--border); color:var(--text); cursor:pointer; font-size:12.5px;
+}
+.theme-toggle .dot{width:8px; height:8px; border-radius:50%; background:var(--copper);}
+.logout-btn{margin-top:8px;}
+.dot-danger{background:var(--danger) !important;}
+.storage-note{font-size:10.5px; color:var(--text-faint); text-align:center; margin-top:10px;}
+
+.main-col{flex:1; min-width:0; display:flex; flex-direction:column;}
+.topbar{
+  height:60px; flex:none; display:flex; align-items:center; gap:14px; padding:0 22px;
+  background:var(--bg-elevated); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:15;
+}
+.icon-btn{display:none; background:none; border:none; font-size:18px; color:var(--text); cursor:pointer;}
+.topbar-title{font-family:var(--font-display); font-weight:700; font-size:17px;}
+.topbar-right{margin-left:auto; display:flex; align-items:center; gap:12px;}
+.role-pill{
+  font-size:11px; font-weight:700; padding:4px 10px; border-radius:20px; background:var(--blue-tint); color:var(--blue);
+  text-transform:uppercase; letter-spacing:.04em;
+}
+.user-chip{display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600;}
+.avatar{
+  width:26px; height:26px; border-radius:50%; background:var(--copper); color:#fff; font-size:12px; font-weight:700;
+  display:flex; align-items:center; justify-content:center; font-family:var(--font-display);
+}
+.content{padding:24px; flex:1;}
+
+/* ==================== VIEWS ==================== */
+.view{display:none;}
+.view.active{display:block; animation:fadeIn .25s ease;}
+@keyframes fadeIn{from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);}}
+
+/* ==================== STAT CARDS ==================== */
+.stat-grid{display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:20px;}
+.stat-card{
+  background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--radius); padding:18px;
+  position:relative; overflow:hidden;
+}
+.stat-label{font-size:12px; color:var(--text-muted); font-weight:600; margin-bottom:8px;}
+.stat-value{font-family:var(--font-mono); font-size:26px; font-weight:600;}
+.stat-trace{position:absolute; right:0; bottom:0; width:60px; height:2px; background:linear-gradient(90deg, transparent, var(--copper));}
+
+/* ==================== PANELS ==================== */
+.panel-row{display:grid; grid-template-columns:2fr 1fr; gap:16px;}
+.panel{
+  background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--radius); padding:20px; margin-bottom:16px;
+}
+.panel-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; gap:10px; flex-wrap:wrap;}
+.panel-head h2{font-size:16px;}
+.panel-head h3{font-size:13px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em;}
+.head-actions{display:flex; gap:8px; flex-wrap:wrap;}
+
+.quick-actions{display:flex; flex-direction:column; gap:8px;}
+.quick-action{
+  display:flex; align-items:center; gap:10px; text-align:left; padding:11px 12px; border-radius:var(--radius-sm);
+  background:var(--bg-sunken); border:1px solid var(--border); color:var(--text); font-weight:600; font-size:13px; cursor:pointer;
+}
+.quick-action:hover{border-color:var(--copper); color:var(--copper-dark);}
+.quick-action i{width:15px; height:15px;}
+
+/* ==================== TABLES ==================== */
+.table-wrap{overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius-sm);}
+.data-table{width:100%; border-collapse:collapse; font-size:13px; min-width:600px;}
+.data-table th{
+  text-align:left; padding:10px 12px; background:var(--bg-sunken); color:var(--text-muted);
+  font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid var(--border);
+  white-space:nowrap;
+}
+.data-table td{padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:middle;}
+.data-table tbody tr:last-child td{border-bottom:none;}
+.data-table tbody tr:hover{background:var(--bg-sunken);}
+.data-table .mono{font-family:var(--font-mono);}
+.data-table input[type=number], .data-table input[type=text]{
+  width:100%; min-width:64px; padding:6px 8px; border:1px solid var(--border-strong); border-radius:6px;
+  background:var(--bg); color:var(--text); font-size:13px; font-family:var(--font-mono);
+}
+.row-icon-btn{
+  background:none; border:none; cursor:pointer; color:var(--text-muted); font-size:14px; padding:4px 6px; border-radius:6px;
+}
+.row-icon-btn:hover{color:var(--danger); background:var(--danger-tint);}
+.row-icon-btn.edit:hover{color:var(--blue); background:var(--blue-tint);}
+.status-badge{font-size:11px; font-weight:700; padding:3px 9px; border-radius:20px; text-transform:capitalize;}
+.status-badge.active, .status-badge.saved{background:var(--success-tint); color:var(--success);}
+.status-badge.inactive, .status-badge.disabled, .status-badge.archived{background:var(--bg-sunken); color:var(--text-faint);}
+.status-badge.draft{background:var(--blue-tint); color:var(--blue);}
+.empty-row td{text-align:center; color:var(--text-faint); padding:26px; font-style:italic;}
+
+/* ==================== FORMS ==================== */
+.form-grid{display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin-bottom:18px;}
+.form-grid-3{grid-template-columns:repeat(3, 1fr);}
+.form-grid-4{grid-template-columns:repeat(4, 1fr);}
+.form-grid-5{grid-template-columns:repeat(5, 1fr); align-items:end;}
+.form-grid label, #loginForm label{font-size:12px; font-weight:600; color:var(--text-muted); display:block;}
+.form-grid input, .form-grid select{
+  display:block; width:100%; margin-top:6px; padding:9px 11px; border-radius:var(--radius-sm);
+  border:1px solid var(--border-strong); background:var(--bg); color:var(--text); font-size:13.5px;
+}
+.form-grid input:focus, .form-grid select:focus{outline:2px solid var(--copper); outline-offset:1px;}
+.checkbox-label{display:flex !important; align-items:center; gap:6px; margin-top:22px;}
+.checkbox-label input{width:auto; margin:0;}
+.form-inline{display:flex; gap:10px; margin-bottom:18px;}
+.form-inline input{flex:1; padding:9px 11px; border-radius:var(--radius-sm); border:1px solid var(--border-strong); background:var(--bg); color:var(--text);}
+.search-input{padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--border-strong); background:var(--bg); color:var(--text); font-size:13px; min-width:220px;}
+.inline-label{font-size:12.5px; color:var(--text-muted); font-weight:600; display:block; margin:6px 0 14px;}
+.inline-label select{margin-left:8px; padding:6px 10px; border-radius:6px; border:1px solid var(--border-strong); background:var(--bg); color:var(--text);}
+.hint-text{font-size:12.5px; color:var(--text-muted); margin:-6px 0 14px;}
+
+/* ==================== NEW QUOTATION ==================== */
+.quote-number-badge{
+  font-family:var(--font-mono); font-size:12px; font-weight:600; background:var(--bg-sunken);
+  border:1px solid var(--border); padding:5px 10px; border-radius:6px; color:var(--copper-dark);
+}
+body.dark .quote-number-badge{color:var(--copper);}
+.items-head{display:flex; align-items:center; justify-content:space-between; margin:22px 0 12px; flex-wrap:wrap; gap:10px;}
+.items-head h3{font-size:14px;}
+.item-search-wrap{position:relative; width:340px; max-width:100%;}
+.item-search-wrap input{width:100%; padding:9px 12px; border-radius:var(--radius-sm); border:1px solid var(--border-strong); background:var(--bg); color:var(--text); font-size:13.5px;}
+.item-search-wrap input:focus{outline:2px solid var(--copper);}
+.suggest-box{
+  position:absolute; top:calc(100% + 4px); left:0; right:0; background:var(--bg-elevated); border:1px solid var(--border);
+  border-radius:var(--radius-sm); box-shadow:var(--shadow-md); max-height:260px; overflow-y:auto; z-index:30;
+}
+.suggest-item{padding:9px 12px; cursor:pointer; font-size:13px; border-bottom:1px solid var(--border);}
+.suggest-item:last-child{border-bottom:none;}
+.suggest-item:hover, .suggest-item.active-suggest{background:var(--copper-tint);}
+.suggest-item .s-code{font-family:var(--font-mono); font-size:11px; color:var(--text-muted);}
+.suggest-empty{padding:12px; font-size:12.5px; color:var(--text-faint); text-align:center;}
+.empty-hint{padding:20px; text-align:center; color:var(--text-faint); font-size:13px; font-style:italic; border:1px dashed var(--border); border-radius:var(--radius-sm); margin-top:8px;}
+
+.totals-row{display:grid; grid-template-columns:1.5fr 1fr; gap:20px; margin-top:24px; align-items:start;}
+.terms-block h3{font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-muted); margin-bottom:10px;}
+.terms-checklist{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
+.term-check{display:flex; align-items:flex-start; gap:8px; font-size:13px; padding:6px 0;}
+.term-check input{margin-top:2px;}
+.totals-block{background:var(--bg-sunken); border:1px solid var(--border); border-radius:var(--radius-sm); padding:16px;}
+.totals-line{display:flex; justify-content:space-between; padding:6px 0; font-size:13.5px; font-family:var(--font-mono);}
+.totals-grand{border-top:1px solid var(--border-strong); margin-top:6px; padding-top:12px; font-size:17px; font-weight:700; font-family:var(--font-display);}
+.quote-actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:22px; padding-top:18px; border-top:1px solid var(--border);}
+.divider-v{width:1px; background:var(--border); margin:0 4px;}
+
+/* ==================== MODAL / TOAST / LOADING ==================== */
+.modal-overlay{
+  position:fixed; inset:0; background:rgba(10,14,20,.5); display:flex; align-items:center; justify-content:center; z-index:100;
+}
+.modal{background:var(--bg-elevated); border-radius:var(--radius); padding:24px; width:340px; max-width:90vw; box-shadow:var(--shadow-lg);}
+.modal h3{font-size:16px; margin-bottom:8px;}
+.modal p{color:var(--text-muted); font-size:13.5px; margin:0 0 20px;}
+.modal-actions{display:flex; justify-content:flex-end; gap:10px;}
+
+.toast{
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg);
+  padding:12px 20px; border-radius:var(--radius-sm); font-size:13.5px; font-weight:600; z-index:200; box-shadow:var(--shadow-lg);
+  animation:toastIn .2s ease;
+}
+@keyframes toastIn{from{opacity:0; transform:translate(-50%,10px);} to{opacity:1; transform:translate(-50%,0);}}
+.loading-overlay{position:fixed; inset:0; background:rgba(10,14,20,.35); display:flex; align-items:center; justify-content:center; z-index:300;}
+.spinner{width:38px; height:38px; border-radius:50%; border:3px solid rgba(255,255,255,.3); border-top-color:var(--copper); animation:spin .7s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* ==================== ICONS (minimal inline set) ==================== */
+i[data-ic]{display:inline-block; width:16px; height:16px; position:relative;}
+i[data-ic]::before{content:""; position:absolute; inset:0; background:currentColor; -webkit-mask-size:contain; mask-size:contain; -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat; -webkit-mask-position:center; mask-position:center;}
+i[data-ic=grid]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Crect x='3' y='3' width='7' height='7'/%3E%3Crect x='14' y='3' width='7' height='7'/%3E%3Crect x='3' y='14' width='7' height='7'/%3E%3Crect x='14' y='14' width='7' height='7'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Crect x='3' y='3' width='7' height='7'/%3E%3Crect x='14' y='3' width='7' height='7'/%3E%3Crect x='3' y='14' width='7' height='7'/%3E%3Crect x='14' y='14' width='7' height='7'/%3E%3C/svg%3E");}
+i[data-ic=plus]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cline x1='12' y1='5' x2='12' y2='19'/%3E%3Cline x1='5' y1='12' x2='19' y2='12'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cline x1='12' y1='5' x2='12' y2='19'/%3E%3Cline x1='5' y1='12' x2='19' y2='12'/%3E%3C/svg%3E");}
+i[data-ic=clock]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpolyline points='12 7 12 12 15 15'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpolyline points='12 7 12 12 15 15'/%3E%3C/svg%3E");}
+i[data-ic=chart]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cline x1='4' y1='20' x2='4' y2='10'/%3E%3Cline x1='12' y1='20' x2='12' y2='4'/%3E%3Cline x1='20' y1='20' x2='20' y2='14'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cline x1='4' y1='20' x2='4' y2='10'/%3E%3Cline x1='12' y1='20' x2='12' y2='4'/%3E%3Cline x1='20' y1='20' x2='20' y2='14'/%3E%3C/svg%3E");}
+i[data-ic=tag]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M20.59 13.41 12 22 2 12l0-8 8 0 10.59 9.41a2 2 0 0 1 0 2.83Z'/%3E%3Ccircle cx='7' cy='7' r='1.5'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M20.59 13.41 12 22 2 12l0-8 8 0 10.59 9.41a2 2 0 0 1 0 2.83Z'/%3E%3Ccircle cx='7' cy='7' r='1.5'/%3E%3C/svg%3E");}
+i[data-ic=box]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M21 8 12 3 3 8v8l9 5 9-5Z'/%3E%3Cpath d='M3 8l9 5 9-5M12 13v8'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M21 8 12 3 3 8v8l9 5 9-5Z'/%3E%3Cpath d='M3 8l9 5 9-5M12 13v8'/%3E%3C/svg%3E");}
+i[data-ic=percent]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cline x1='19' y1='5' x2='5' y2='19'/%3E%3Ccircle cx='6.5' cy='6.5' r='2.5'/%3E%3Ccircle cx='17.5' cy='17.5' r='2.5'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cline x1='19' y1='5' x2='5' y2='19'/%3E%3Ccircle cx='6.5' cy='6.5' r='2.5'/%3E%3Ccircle cx='17.5' cy='17.5' r='2.5'/%3E%3C/svg%3E");}
+i[data-ic=check]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");}
+i[data-ic=user]::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21c0-4 4-6 8-6s8 2 8 6'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21c0-4 4-6 8-6s8 2 8 6'/%3E%3C/svg%3E");}
+
+/* ==================== ADMIN VISIBILITY ==================== */
+body.role-user .admin-only{display:none !important;}
+
+/* ==================== RESPONSIVE ==================== */
+@media (max-width: 980px){
+  .panel-row{grid-template-columns:1fr;}
+  .stat-grid{grid-template-columns:repeat(2, 1fr);}
+  .totals-row{grid-template-columns:1fr;}
+  .form-grid{grid-template-columns:repeat(2, 1fr);}
+}
+@media (max-width: 760px){
+  .icon-btn{display:block;}
+  .sidebar{position:fixed; left:0; top:0; bottom:0; transform:translateX(-100%); transition:transform .2s ease; box-shadow:var(--shadow-lg);}
+  .sidebar.open{transform:translateX(0);}
+  .topbar-right .user-chip{display:none;}
+  .stat-grid{grid-template-columns:1fr 1fr;}
+  .form-grid, .form-grid-3, .form-grid-4, .form-grid-5{grid-template-columns:1fr 1fr;}
+  .terms-checklist{grid-template-columns:1fr;}
+  .item-search-wrap{width:100%;}
+}
+@media (max-width: 480px){
+  .content{padding:14px;}
+  .stat-grid{grid-template-columns:1fr;}
+  .form-grid, .form-grid-3, .form-grid-4, .form-grid-5{grid-template-columns:1fr;}
+}
+
+@media (prefers-reduced-motion: reduce){
+  *{animation-duration:.001s !important; transition-duration:.001s !important;}
+}
+
+</style>
+</head>
+<body>
+
+<!-- ================= LOGIN SCREEN ================= -->
+<div id="loginScreen" class="login-screen">
+  <div class="login-trace" aria-hidden="true">
+    <svg viewBox="0 0 400 400" width="100%" height="100%">
+      <path d="M0,80 H120 L150,110 V220 L180,250 H400" class="trace-line" />
+      <path d="M0,320 H90 L120,290 V180 L150,150 H400" class="trace-line trace-line-2" />
+      <circle cx="150" cy="110" r="4" class="trace-node"/>
+      <circle cx="150" cy="150" r="4" class="trace-node"/>
+      <circle cx="180" cy="250" r="4" class="trace-node"/>
+      <circle cx="120" cy="290" r="4" class="trace-node"/>
+    </svg>
+  </div>
+  <div class="login-card">
+    <div class="brand">
+      <div>
+        <div class="brand-name">Ambition Tradelink</div>
+        <div class="brand-sub">Quotation Management</div>
+      </div>
+    </div>
+    <h1>Sign in</h1>
+    <p class="login-hint">Sign in with your account.</p>
+    <form id="loginForm">
+      <label>Username
+        <input type="text" id="loginUser" autocomplete="username" required>
+      </label>
+      <label>Password
+        <input type="password" id="loginPass" autocomplete="current-password" required>
+      </label>
+      <div id="loginError" class="field-error" hidden>Invalid username or password.</div>
+      <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<!-- ================= APP SHELL ================= -->
+<div id="app" class="app" hidden>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="brand brand-sidebar">
+      <div>
+        <div class="brand-name">Ambition Tradelink</div>
+        <div class="brand-sub">Quotations</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-group-label">Workspace</div>
+      <button class="nav-item active" data-view="dashboard"><i data-ic="grid"></i>Dashboard</button>
+      <button class="nav-item" data-view="newQuotation"><i data-ic="plus"></i>New Quotation</button>
+      <button class="nav-item" data-view="previousQuotations"><i data-ic="clock"></i>Previous Quotations</button>
+      <button class="nav-item" data-view="reports"><i data-ic="chart"></i>Reports</button>
+
+      <div class="nav-group-label admin-only">Admin</div>
+      <button class="nav-item admin-only" data-view="priceLists"><i data-ic="tag"></i>Price Lists</button>
+      <button class="nav-item admin-only" data-view="itemMaster"><i data-ic="box"></i>Item Master</button>
+      <button class="nav-item admin-only" data-view="gstSettings"><i data-ic="percent"></i>GST Settings</button>
+      <button class="nav-item admin-only" data-view="terms"><i data-ic="check"></i>Terms &amp; Conditions</button>
+      <button class="nav-item admin-only" data-view="users"><i data-ic="user"></i>User Management</button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button id="themeToggle" class="theme-toggle" title="Toggle theme">
+        <span class="dot"></span> <span id="themeLabel">Dark mode</span>
+      </button>
+      <button id="sidebarLogoutBtn" class="theme-toggle logout-btn" title="Log out of your account">
+        <span class="dot dot-danger"></span> Log out
+      </button>
+      <div class="storage-note">Synced to Supabase</div>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <header class="topbar">
+      <button class="icon-btn" id="menuBtn" aria-label="Toggle menu">☰</button>
+      <div class="topbar-title" id="viewTitle">Dashboard</div>
+      <div class="topbar-right">
+        <span class="role-pill" id="roleBadge">Admin</span>
+        <div class="user-chip">
+          <span class="avatar" id="userAvatar">A</span>
+          <span id="userName">Admin</span>
+        </div>
+        <button class="btn btn-ghost" id="logoutBtn">Log out</button>
+      </div>
+    </header>
+
+    <main class="content" id="content">
+
+      <!-- ---------- DASHBOARD ---------- -->
+      <section class="view active" id="view-dashboard">
+        <div class="stat-grid">
+          <div class="stat-card">
+            <div class="stat-label">Quotations this month</div>
+            <div class="stat-value" id="statQuotesMonth">0</div>
+            <div class="stat-trace"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Quoted value (₹)</div>
+            <div class="stat-value" id="statQuoteValue">0</div>
+            <div class="stat-trace"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Active price lists</div>
+            <div class="stat-value" id="statPriceLists">0</div>
+            <div class="stat-trace"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Items in catalogue</div>
+            <div class="stat-value" id="statItems">0</div>
+            <div class="stat-trace"></div>
+          </div>
+        </div>
+
+        <div class="panel-row">
+          <div class="panel panel-wide">
+            <div class="panel-head">
+              <h2>Recent quotations</h2>
+              <button class="btn btn-primary btn-sm" data-nav="newQuotation">+ New Quotation</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table" id="recentQuotesTable">
+                <thead><tr><th>Quotation #</th><th>Party</th><th>Date</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Quick actions</h2></div>
+            <div class="quick-actions">
+              <button class="quick-action" data-nav="newQuotation"><i data-ic="plus"></i>Create quotation</button>
+              <button class="quick-action" data-nav="previousQuotations"><i data-ic="clock"></i>View history</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- NEW / EDIT QUOTATION ---------- -->
+      <section class="view" id="view-newQuotation">
+        <div class="panel">
+          <div class="panel-head">
+            <h2 id="quoteFormTitle">New Quotation</h2>
+            <span class="quote-number-badge" id="quoteNumberBadge">QTN-0000</span>
+          </div>
+
+          <div class="form-grid">
+            <label>Party Name
+              <input type="text" id="qPartyName" placeholder="e.g. Shree Electricals">
+            </label>
+            <label>Date
+              <input type="date" id="qDate">
+            </label>
+            <label>Price List
+              <select id="qPriceList"></select>
+            </label>
+            <label>GST
+              <select id="qGst"></select>
+            </label>
+          </div>
+
+          <div class="items-head">
+            <h3>Items</h3>
+            <div class="item-search-wrap">
+              <input type="text" id="itemSearchInput" placeholder="Search by description or part code…" autocomplete="off">
+              <div class="suggest-box" id="suggestBox" hidden></div>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table items-table" id="itemsTable">
+              <thead>
+                <tr>
+                  <th>Part Code</th><th>Description</th><th>Category</th>
+                  <th>LP (₹)</th><th>Qty</th><th>Disc %</th><th>Final Rate</th><th>Amount</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="itemsTableBody"></tbody>
+            </table>
+          </div>
+          <div class="empty-hint" id="itemsEmptyHint">Search above and select an item to add it to the quotation.</div>
+
+          <div class="totals-row">
+            <div class="terms-block">
+              <h3>Terms &amp; Conditions</h3>
+              <div id="termsChecklist" class="terms-checklist"></div>
+            </div>
+            <div class="totals-block">
+              <div class="totals-line"><span>Subtotal</span><span id="sumSubtotal">₹0.00</span></div>
+              <div class="totals-line"><span id="sumGstLabel">GST (0%)</span><span id="sumGst">₹0.00</span></div>
+              <div class="totals-line totals-grand"><span>Grand Total</span><span id="sumGrand">₹0.00</span></div>
+            </div>
+          </div>
+
+          <div class="quote-actions">
+            <button class="btn btn-secondary" id="btnSaveDraft">Save Draft</button>
+            <button class="btn btn-primary" id="btnSaveQuote">Save Quotation</button>
+            <span class="divider-v"></span>
+            <button class="btn btn-outline" id="btnPdfOpt1">Export PDF · Full</button>
+            <button class="btn btn-outline" id="btnPdfOpt2">Export PDF · Simple</button>
+            <button class="btn btn-outline" id="btnXlsOpt1">Export Excel · Full</button>
+            <button class="btn btn-outline" id="btnXlsOpt2">Export Excel · Simple</button>
+            <button class="btn btn-outline" id="btnCopyQuote">Copy Quotation</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- PREVIOUS QUOTATIONS ---------- -->
+      <section class="view" id="view-previousQuotations">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Previous Quotations</h2>
+            <input type="text" id="quoteSearch" placeholder="Search by party, number or date…" class="search-input">
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="allQuotesTable">
+              <thead><tr><th>Quotation #</th><th>Party</th><th>Date</th><th>Items</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- REPORTS ---------- -->
+      <section class="view" id="view-reports">
+        <div class="panel">
+          <div class="panel-head"><h2>Reports</h2></div>
+          <div class="stat-grid">
+            <div class="stat-card"><div class="stat-label">Total Quotations</div><div class="stat-value" id="repTotalQuotes">0</div></div>
+            <div class="stat-card"><div class="stat-label">Total Quoted Value</div><div class="stat-value" id="repTotalValue">0</div></div>
+            <div class="stat-card"><div class="stat-label">Avg. Quotation Value</div><div class="stat-value" id="repAvgValue">0</div></div>
+          </div>
+          <div class="panel-head"><h3>Top Parties by Value</h3></div>
+          <div class="table-wrap">
+            <table class="data-table" id="topPartiesTable">
+              <thead><tr><th>Party</th><th>Quotations</th><th>Total Value</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- PRICE LISTS (ADMIN) ---------- -->
+      <section class="view" id="view-priceLists">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Price List Management</h2>
+            <div class="head-actions">
+              <label class="btn btn-outline file-btn">
+                Upload Excel (.xlsx/.xls)
+                <input type="file" id="priceListUpload" accept=".xlsx,.xls" hidden>
+              </label>
+              <button class="btn btn-primary btn-sm" id="btnNewPriceList">+ New Price List</button>
+            </div>
+          </div>
+          <p class="hint-text">Choose "Create new price list" (or an existing one) below, then upload. New items are added to Item Master automatically. Accepted columns: PartCode/Product Reference, Description, LP/MRP/Price, Category. Prefer to type prices in by hand instead? Click "Manage Prices" on any list below.</p>
+          <label class="inline-label">Upload target: <select id="uploadTargetList"></select></label>
+          <div class="table-wrap">
+            <table class="data-table" id="priceListsTable">
+              <thead><tr><th>Name</th><th>Items</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- PRICE LIST DETAIL (manually add/edit LP per item) ---------- -->
+      <section class="view" id="view-priceListDetail">
+        <div class="panel">
+          <div class="panel-head">
+            <h2 id="plDetailTitle">Manage Prices</h2>
+            <div class="head-actions">
+              <button class="btn btn-ghost btn-sm" id="btnBackToPriceLists">← Back to Price Lists</button>
+            </div>
+          </div>
+          <form id="plDetailAddForm" class="form-grid form-grid-5">
+            <label>Part Code<input type="text" id="plaPartCode" required></label>
+            <label>Description<input type="text" id="plaDescription" required></label>
+            <label>Category<input type="text" id="plaCategory" required></label>
+            <label>LP (₹)<input type="number" id="plaLP" step="0.01" required></label>
+            <button type="submit" class="btn btn-primary">+ Add Item with This Price</button>
+          </form>
+          <p class="hint-text">Adding here creates the item in Item Master (if it doesn't already exist) and sets its price in this list only. Existing items below can have their price edited directly — it saves automatically.</p>
+          <input type="text" id="plDetailSearch" placeholder="Search items…" class="search-input">
+          <div class="table-wrap">
+            <table class="data-table" id="plDetailTable">
+              <thead><tr><th>Part Code</th><th>Description</th><th>Category</th><th>LP (₹) in this list</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- ITEM MASTER (ADMIN) ---------- -->
+      <section class="view" id="view-itemMaster">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Item Master</h2>
+            <input type="text" id="itemMasterSearch" placeholder="Search items…" class="search-input">
+          </div>
+          <form id="itemMasterForm" class="form-grid form-grid-5">
+            <input type="hidden" id="imEditId">
+            <label>Part Code<input type="text" id="imPartCode" required></label>
+            <label>Description<input type="text" id="imDescription" required></label>
+            <label>Category<input type="text" id="imCategory" required></label>
+            <label>LP (₹)<input type="number" id="imLP" step="0.01" required></label>
+            <label>Status
+              <select id="imStatus"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+            </label>
+            <button type="submit" class="btn btn-primary" id="imSubmitBtn">Add Item</button>
+          </form>
+          <div class="table-wrap">
+            <table class="data-table" id="itemMasterTable">
+              <thead><tr><th>Part Code</th><th>Description</th><th>Category</th><th>LP</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- GST SETTINGS (ADMIN) ---------- -->
+      <section class="view" id="view-gstSettings">
+        <div class="panel">
+          <div class="panel-head"><h2>GST Settings</h2></div>
+          <form id="gstForm" class="form-grid form-grid-3">
+            <input type="hidden" id="gstEditId">
+            <label>Label<input type="text" id="gstLabel" placeholder="e.g. 18%" required></label>
+            <label>Rate (%)<input type="number" id="gstRate" step="0.01" min="0" required></label>
+            <label class="checkbox-label"><input type="checkbox" id="gstDefault"> Set as default</label>
+            <button type="submit" class="btn btn-primary" id="gstSubmitBtn">Add GST Rate</button>
+          </form>
+          <div class="table-wrap">
+            <table class="data-table" id="gstTable">
+              <thead><tr><th>Label</th><th>Rate</th><th>Default</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- TERMS & CONDITIONS (ADMIN) ---------- -->
+      <section class="view" id="view-terms">
+        <div class="panel">
+          <div class="panel-head"><h2>Terms &amp; Conditions</h2></div>
+          <form id="termsForm" class="form-inline">
+            <input type="hidden" id="termEditId">
+            <input type="text" id="termText" placeholder="Term text, e.g. Freight Extra" required>
+            <button type="submit" class="btn btn-primary" id="termSubmitBtn">Add Term</button>
+          </form>
+          <div class="table-wrap">
+            <table class="data-table" id="termsTable">
+              <thead><tr><th>#</th><th>Term</th><th>Status</th><th>Reorder</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- USER MANAGEMENT (ADMIN) ---------- -->
+      <section class="view" id="view-users">
+        <div class="panel">
+          <div class="panel-head"><h2>User Management</h2></div>
+          <form id="userForm" class="form-grid form-grid-4">
+            <input type="hidden" id="userEditId">
+            <label>Username<input type="text" id="userUsername" required></label>
+            <label>Password<input type="text" id="userPassword" required></label>
+            <label>Role
+              <select id="userRole"><option value="user">User</option><option value="admin">Admin</option></select>
+            </label>
+            <button type="submit" class="btn btn-primary" id="userSubmitBtn">Add User</button>
+          </form>
+          <div class="table-wrap">
+            <table class="data-table" id="usersTable">
+              <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- Confirm dialog -->
+<div class="modal-overlay" id="confirmOverlay" hidden>
+  <div class="modal">
+    <h3 id="confirmTitle">Are you sure?</h3>
+    <p id="confirmBody">This action cannot be undone.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="confirmCancel">Cancel</button>
+      <button class="btn btn-danger" id="confirmOk">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast" hidden></div>
+<!-- Loading overlay -->
+<div class="loading-overlay" id="loadingOverlay" hidden><div class="spinner"></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+/* ==========================================================
+   Ambition Tradelink — Quotation Management
+   All data lives in memory for this demo build (no backend).
+   Reloading the page resets it back to the seed data below.
+   ========================================================== */
+
+(function(){
+"use strict";
+
+/* ---------------- DATA STORE (empty shell — populated from Supabase) ---------------- */
+/* The starting sample data (items, price lists, GST rates, terms, demo
+   quotations, demo users) now lives in Supabase — it was seeded there by
+   running supabase_setup.sql once. This shell is just what `db` looks
+   like before loadDB() fetches the real rows. */
+let db = {
+  users: [],
+  itemMaster: [],
+  priceLists: [],
+  gstRates: [],
+  terms: [],
+  quotations: [],
+  nextQuoteSeq: 1003,
+};
+
+/* ---------------- SUPABASE CONNECTION ----------------
+   The app's data (items, price lists, quotations, GST rates, terms,
+   users) is stored in Supabase instead of the browser's localStorage,
+   so it's shared across devices/browsers instead of living on just one.
+
+   SECURITY NOTE: this app uses its own simple username/password table
+   (not Supabase Auth), together with the "publishable" anon API key
+   below. That key is visible to anyone who views this page's source,
+   and the database policies allow it full read/write access to every
+   table — including the users table. That's fine for a private/internal
+   tool, but it means anyone who has this URL + key could bypass the
+   login screen entirely and read/edit the data directly. Don't put
+   this page somewhere the public can reach unless that's acceptable.
+------------------------------------------------------------- */
+const SUPABASE_URL = "https://tadgparpnbighgokomlm.supabase.co";
+const SUPABASE_KEY = "sb_publishable_a61Weldxj9HGpsfiFLn8CA_Nkkm6tZX";
+if(!window.supabase){
+  alert("Could not load the Supabase library (needs internet access to reach cdn.jsdelivr.net). Open this file directly in a normal browser tab — not inside a restricted preview — and check your connection, then reload the page.");
+  throw new Error("Supabase JS library failed to load from CDN.");
+}
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+/* ---------------- ROW <-> APP OBJECT MAPPERS ----------------
+   Supabase table columns use snake_case; the app's in-memory
+   objects use camelCase. These convert between the two. */
+const mapUser        = r => ({ id:r.id, username:r.username, password:r.password, role:r.role, status:r.status });
+const unmapUser       = u => ({ id:u.id, username:u.username, password:u.password, role:u.role, status:u.status });
+
+const mapItem         = r => ({ id:r.id, partCode:r.part_code, description:r.description, category:r.category, status:r.status });
+const unmapItem        = it => ({ id:it.id, part_code:it.partCode, description:it.description, category:it.category, status:it.status });
+
+const mapPriceList    = r => ({ id:r.id, name:r.name, status:r.status, created:r.created, lp:r.lp || {} });
+const unmapPriceList   = p => ({ id:p.id, name:p.name, status:p.status, created:p.created, lp:p.lp || {} });
+
+const mapGst           = r => ({ id:r.id, label:r.label, rate:Number(r.rate), isDefault:r.is_default });
+const unmapGst          = g => ({ id:g.id, label:g.label, rate:g.rate, is_default:g.isDefault });
+
+const mapTerm           = r => ({ id:r.id, text:r.text, enabled:r.enabled, order:r.sort_order });
+const unmapTerm          = t => ({ id:t.id, text:t.text, enabled:t.enabled, sort_order:t.order });
+
+const mapQuotation      = r => ({ id:r.id, number:r.number, party:r.party, date:r.date, priceListId:r.price_list_id, gstId:r.gst_id, status:r.status, items:r.items || [], terms:r.terms || [] });
+const unmapQuotation     = q => ({ id:q.id, number:q.number, party:q.party, date:q.date, price_list_id:q.priceListId, gst_id:q.gstId, status:q.status, items:q.items || [], terms:q.terms || [] });
+
+/* ---------------- SUPABASE PERSISTENCE ----------------
+   loadDB() pulls every table down into the in-memory `db` object
+   on startup. saveDB() pushes the current in-memory `db` back up —
+   it's called (as it always was) after every mutation, so it just
+   diffs each table against what's currently in Supabase: rows that
+   no longer exist locally get deleted, everything else gets
+   upserted. Calls are debounced slightly so a burst of renders only
+   triggers one round-trip.
+------------------------------------------------------------- */
+
+function errText(e){
+  if(!e) return "Unknown error";
+  if(typeof e === "string") return e;
+  return e.message || e.error_description || e.hint || e.details || JSON.stringify(e);
+}
+
+async function syncTable(table, rows, toRow){
+  const mapped = rows.map(toRow);
+  const ids = mapped.map(r => r.id);
+  const { data: existing, error: selErr } = await supabase.from(table).select("id");
+  if(selErr) throw selErr;
+  const toDelete = (existing || []).map(r => r.id).filter(id => !ids.includes(id));
+  if(toDelete.length){
+    const { error: delErr } = await supabase.from(table).delete().in("id", toDelete);
+    if(delErr) throw delErr;
+  }
+  if(mapped.length){
+    const { error: upErr } = await supabase.from(table).upsert(mapped);
+    if(upErr) throw upErr;
+  }
+}
+
+let saveTimer = null;
+function saveDB(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(doSaveDB, 300);
+}
+
+async function doSaveDB(){
+  try{
+    // Sync tables quotations can reference first, so a brand-new price
+    // list / GST rate always exists before a quotation that uses it
+    // gets saved (otherwise Postgres rejects the foreign key).
+    await Promise.all([
+      syncTable("users", db.users, unmapUser),
+      syncTable("item_master", db.itemMaster, unmapItem),
+      syncTable("price_lists", db.priceLists, unmapPriceList),
+      syncTable("gst_rates", db.gstRates, unmapGst),
+      syncTable("terms", db.terms, unmapTerm),
+    ]);
+    // Safety net: if a quotation is still pointing at a price list or GST
+    // rate that no longer exists locally (shouldn't happen, but this is
+    // exactly the bug that caused foreign-key errors before), null it out
+    // rather than sending Supabase a reference it will reject.
+    const plIds = new Set(db.priceLists.map(p=>p.id));
+    const gstIds = new Set(db.gstRates.map(g=>g.id));
+    db.quotations.forEach(q=>{
+      if(q.priceListId && !plIds.has(q.priceListId)) q.priceListId = null;
+      if(q.gstId && !gstIds.has(q.gstId)) q.gstId = null;
+    });
+    await syncTable("quotations", db.quotations, unmapQuotation);
+    const { error: metaErr } = await supabase.from("app_meta").upsert({ id:"app", next_quote_seq: db.nextQuoteSeq });
+    if(metaErr) throw metaErr;
+  }catch(e){
+    console.warn("Could not sync to Supabase:", e);
+    toast("⚠ Sync failed: " + errText(e), 8000);
+  }
+}
+
+async function loadDB(){
+  try{
+    const [u, im, pl, gst, tm, q, meta] = await Promise.all([
+      supabase.from("users").select("*"),
+      supabase.from("item_master").select("*"),
+      supabase.from("price_lists").select("*"),
+      supabase.from("gst_rates").select("*"),
+      supabase.from("terms").select("*"),
+      supabase.from("quotations").select("*"),
+      supabase.from("app_meta").select("*").eq("id","app").maybeSingle(),
+    ]);
+    [u, im, pl, gst, tm, q].forEach(res => { if(res.error) throw res.error; });
+    if(meta.error) throw meta.error;
+
+    db = {
+      users: (u.data || []).map(mapUser),
+      itemMaster: (im.data || []).map(mapItem),
+      priceLists: (pl.data || []).map(mapPriceList),
+      gstRates: (gst.data || []).map(mapGst),
+      terms: (tm.data || []).map(mapTerm),
+      quotations: (q.data || []).map(mapQuotation),
+      nextQuoteSeq: meta.data ? meta.data.next_quote_seq : 1003,
+    };
+
+    // Recompute the local id counter from the highest numeric suffix
+    // seen across every loaded row, so newly created ids never collide
+    // with ones already in Supabase.
+    let maxNum = 100;
+    [...db.users, ...db.itemMaster, ...db.priceLists, ...db.gstRates, ...db.terms, ...db.quotations].forEach(r=>{
+      const m = String(r.id).match(/(\d+)$/);
+      if(m) maxNum = Math.max(maxNum, Number(m[1]));
+    });
+    idCounter.i = maxNum;
+  }catch(e){
+    console.warn("Could not load data from Supabase:", e);
+    toast("⚠ Load failed: " + errText(e), 8000);
+  }
+}
+
+/* ---------------- SESSION PERSISTENCE ----------------
+   Keeps a signed-in user logged in across page refreshes for
+   the rest of the calendar day, so the login screen doesn't
+   reappear every time the page reloads. The saved session
+   automatically expires once the date changes, or immediately
+   on logout.
+------------------------------------------------------------- */
+const SESSION_KEY = "atl_qms_session_v1";
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+
+function saveSession(user){
+  try{
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ username: user.username, date: todayStr() }));
+  }catch(e){
+    console.warn("Could not save session:", e);
+  }
+}
+
+function clearSession(){
+  try{ localStorage.removeItem(SESSION_KEY); }catch(e){}
+}
+
+function restoreSession(){
+  try{
+    const raw = localStorage.getItem(SESSION_KEY);
+    if(!raw) return false;
+    const saved = JSON.parse(raw);
+    if(saved.date !== todayStr()){ clearSession(); return false; }
+    const user = db.users.find(x=> x.username === saved.username && x.status === "active");
+    if(!user){ clearSession(); return false; }
+    session.user = user;
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
+let session = { user:null };
+let quoteCounter = { i:1 };
+let idCounter = { i:100 };
+function uid(prefix){ idCounter.i++; return prefix + idCounter.i; }
+
+/* current quotation being built/edited in the form */
+let draft = null;
+function newDraft(){
+  const activeList = db.priceLists.find(p=>p.status==="active") || db.priceLists[0];
+  const defaultGst = db.gstRates.find(g=>g.isDefault) || db.gstRates[0];
+  return {
+    editingId:null,
+    number:"QTN-" + db.nextQuoteSeq,
+    party:"",
+    date: new Date().toISOString().slice(0,10),
+    priceListId: activeList ? activeList.id : "",
+    gstId: defaultGst ? defaultGst.id : "",
+    items:[],
+    terms:[],
+  };
+}
+
+/* ---------------- HELPERS ---------------- */
+
+const $ = (sel, ctx) => (ctx||document).querySelector(sel);
+const $all = (sel, ctx) => Array.from((ctx||document).querySelectorAll(sel));
+const money = n => "₹" + (Number(n)||0).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
+const plainMoney = n => (Number(n)||0).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
+
+function toast(msg, duration){
+  const el = $("#toast");
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(()=>{ el.hidden = true; }, duration || 2600);
+}
+
+function showLoading(on){ $("#loadingOverlay").hidden = !on; }
+
+function confirmDialog(title, body){
+  return new Promise(resolve=>{
+    const overlay = $("#confirmOverlay");
+    $("#confirmTitle").textContent = title;
+    $("#confirmBody").textContent = body;
+    overlay.hidden = false;
+    const ok = $("#confirmOk"), cancel = $("#confirmCancel");
+    function cleanup(v){ overlay.hidden = true; ok.removeEventListener("click", onOk); cancel.removeEventListener("click", onCancel); resolve(v); }
+    function onOk(){ cleanup(true); }
+    function onCancel(){ cleanup(false); }
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+  });
+}
+
+function withLoading(fn, delay){
+  showLoading(true);
+  setTimeout(()=>{ fn(); showLoading(false); }, delay || 350);
+}
+
+/* ---------------- AUTH ---------------- */
+
+function tryLogin(username, password){
+  const u = db.users.find(x=>x.username===username && x.password===password && x.status==="active");
+  return u || null;
+}
+
+$("#loginForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  const u = $("#loginUser").value.trim();
+  const p = $("#loginPass").value;
+  const user = tryLogin(u,p);
+  if(!user){ $("#loginError").hidden = false; return; }
+  $("#loginError").hidden = true;
+  session.user = user;
+  saveSession(user);
+  enterApp();
+});
+
+function doLogout(){
+  session.user = null;
+  clearSession();
+  $("#app").hidden = true;
+  $("#loginScreen").hidden = false;
+  $("#loginForm").reset();
+}
+$("#logoutBtn").addEventListener("click", doLogout);
+
+function enterApp(){
+  $("#loginScreen").hidden = true;
+  $("#app").hidden = false;
+  document.body.classList.toggle("role-user", session.user.role !== "admin");
+  $("#roleBadge").textContent = session.user.role === "admin" ? "Admin" : "Sales User";
+  $("#userName").textContent = session.user.username;
+  $("#userAvatar").textContent = session.user.username[0].toUpperCase();
+  navigateTo("dashboard");
+  renderAll();
+}
+
+/* Load data from Supabase, then resume an existing same-day session
+   automatically, so a page refresh doesn't force a fresh login. */
+showLoading(true);
+loadDB().then(()=>{
+  showLoading(false);
+  if(restoreSession()){
+    enterApp();
+  }
+});
+
+/* ---------------- NAVIGATION ---------------- */
+
+function navigateTo(view){
+  $all(".view").forEach(v=>v.classList.remove("active"));
+  const target = $("#view-" + view);
+  if(target) target.classList.add("active");
+  $all(".nav-item").forEach(n=>n.classList.toggle("active", n.dataset.view === view));
+  const label = { dashboard:"Dashboard", newQuotation: draft && draft.editingId ? "Edit Quotation" : "New Quotation",
+    previousQuotations:"Previous Quotations", reports:"Reports", priceLists:"Price List Management",
+    itemMaster:"Item Master", gstSettings:"GST Settings", terms:"Terms & Conditions", users:"User Management" };
+  $("#viewTitle").textContent = label[view] || "Ambition Tradelink";
+  $("#sidebar").classList.remove("open");
+  if(view === "newQuotation" && !draft){ startNewQuotation(); }
+  if(view === "previousQuotations") renderQuotationsTable();
+  if(view === "priceLists") renderPriceLists();
+  if(view === "itemMaster") renderItemMaster();
+  if(view === "gstSettings") renderGstSettings();
+  if(view === "terms") renderTerms();
+  if(view === "users") renderUsers();
+  if(view === "reports") renderReports();
+  if(view === "dashboard") renderDashboard();
+}
+
+$all(".nav-item").forEach(btn=>{
+  btn.addEventListener("click", ()=> navigateTo(btn.dataset.view));
+});
+$all("[data-nav]").forEach(btn=>{
+  btn.addEventListener("click", ()=> navigateTo(btn.dataset.nav));
+});
+$("#menuBtn").addEventListener("click", ()=> $("#sidebar").classList.toggle("open"));
+
+/* ---------------- THEME ---------------- */
+
+function applyTheme(dark){
+  document.body.classList.toggle("dark", dark);
+  $("#themeLabel").textContent = dark ? "Light mode" : "Dark mode";
+}
+let isDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+applyTheme(isDark);
+$("#themeToggle").addEventListener("click", ()=>{
+  isDark = !isDark;
+  applyTheme(isDark);
+});
+
+const sidebarLogoutBtn = $("#sidebarLogoutBtn");
+if(sidebarLogoutBtn){
+  sidebarLogoutBtn.addEventListener("click", doLogout);
+}
+
+/* ---------------- RENDER: DASHBOARD ---------------- */
+
+function quoteTotal(q){
+  const pl = db.priceLists.find(p=>p.id===q.priceListId);
+  const gst = db.gstRates.find(g=>g.id===q.gstId) || {rate:0};
+  let subtotal = 0;
+  q.items.forEach(it=>{
+    const rate = it.lp * (1 - (it.discount||0)/100);
+    subtotal += rate * it.qty;
+  });
+  const gstAmt = subtotal * (gst.rate/100);
+  return { subtotal, gstAmt, grand: subtotal + gstAmt };
+}
+
+function renderDashboard(){
+  saveDB();
+  const now = new Date();
+  const thisMonth = db.quotations.filter(q=>{
+    const d = new Date(q.date);
+    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+  });
+  $("#statQuotesMonth").textContent = thisMonth.length;
+  const totalValue = db.quotations.reduce((s,q)=> s + quoteTotal(q).grand, 0);
+  $("#statQuoteValue").textContent = plainMoney(totalValue);
+  $("#statPriceLists").textContent = db.priceLists.filter(p=>p.status==="active").length;
+  $("#statItems").textContent = db.itemMaster.length;
+
+  const tbody = $("#recentQuotesTable tbody");
+  tbody.innerHTML = "";
+  const recent = [...db.quotations].sort((a,b)=> b.date.localeCompare(a.date)).slice(0,6);
+  if(!recent.length){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">No quotations yet — create your first one.</td></tr>`;
+  }
+  recent.forEach(q=>{
+    const t = quoteTotal(q);
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono">${q.number}</td>
+      <td>${escapeHtml(q.party)}</td>
+      <td class="mono">${q.date}</td>
+      <td class="mono">${money(t.grand)}</td>
+      <td><span class="status-badge ${q.status}">${q.status}</span></td>
+      <td><button class="btn btn-ghost btn-sm" data-open="${q.id}">Open</button></td>`;
+    tbody.appendChild(tr);
+  });
+  $all("[data-open]", tbody).forEach(b=> b.addEventListener("click", ()=> openQuotation(b.dataset.open)));
+}
+
+function escapeHtml(s){
+  return String(s==null?"":s).replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+/* ---------------- NEW QUOTATION ---------------- */
+
+function refreshPriceListSelect(){
+  const sel = $("#qPriceList");
+  sel.innerHTML = db.priceLists.filter(p=>p.status!=="archived").map(p=>
+    `<option value="${p.id}">${escapeHtml(p.name)}${p.status==="inactive" ? " (inactive)" : ""}</option>`).join("");
+}
+function refreshGstSelect(){
+  const sel = $("#qGst");
+  sel.innerHTML = db.gstRates.map(g=> `<option value="${g.id}">${escapeHtml(g.label)}</option>`).join("");
+}
+
+function startNewQuotation(){
+  draft = newDraft();
+  $("#quoteFormTitle").textContent = "New Quotation";
+  refreshPriceListSelect();
+  refreshGstSelect();
+  $("#qPartyName").value = "";
+  $("#qDate").value = draft.date;
+  $("#qPriceList").value = draft.priceListId;
+  $("#qGst").value = draft.gstId;
+  $("#quoteNumberBadge").textContent = draft.number;
+  renderTermsChecklist();
+  renderItemsTable();
+  recalcTotals();
+}
+
+function openQuotation(id){
+  const q = db.quotations.find(x=>x.id===id);
+  if(!q) return;
+  draft = {
+    editingId: q.id, number: q.number, party: q.party, date: q.date,
+    priceListId: q.priceListId, gstId: q.gstId,
+    items: q.items.map(it=>({...it})), terms: [...q.terms],
+  };
+  navigateTo("newQuotation");
+  $("#quoteFormTitle").textContent = "Edit Quotation";
+  refreshPriceListSelect();
+  refreshGstSelect();
+  $("#qPartyName").value = draft.party;
+  $("#qDate").value = draft.date;
+  $("#qPriceList").value = draft.priceListId;
+  $("#qGst").value = draft.gstId;
+  $("#quoteNumberBadge").textContent = draft.number;
+  renderTermsChecklist();
+  renderItemsTable();
+  recalcTotals();
+}
+
+["qPartyName","qDate"].forEach(id=>{
+  $("#"+id).addEventListener("input", ()=>{
+    if(!draft) return;
+    draft.party = $("#qPartyName").value;
+    draft.date = $("#qDate").value;
+  });
+});
+$("#qPriceList").addEventListener("change", ()=>{
+  draft.priceListId = $("#qPriceList").value;
+  // refresh LP for existing items against the newly selected price list
+  const pl = db.priceLists.find(p=>p.id===draft.priceListId);
+  draft.items.forEach(it=>{ if(pl && pl.lp[it.itemId] != null) it.lp = pl.lp[it.itemId]; });
+  renderItemsTable();
+  recalcTotals();
+});
+$("#qGst").addEventListener("change", ()=>{
+  draft.gstId = $("#qGst").value;
+  recalcTotals();
+});
+
+/* --- item search / autosuggest --- */
+const itemSearchInput = $("#itemSearchInput");
+const suggestBox = $("#suggestBox");
+let suggestIndex = -1, suggestResults = [];
+
+itemSearchInput.addEventListener("input", ()=>{
+  const q = itemSearchInput.value.trim().toLowerCase();
+  suggestIndex = -1;
+  if(!q){ suggestBox.hidden = true; return; }
+  const pl = db.priceLists.find(p=>p.id===draft.priceListId);
+  suggestResults = db.itemMaster.filter(it=> it.status==="active" &&
+    (it.description.toLowerCase().includes(q) || it.partCode.toLowerCase().includes(q))
+  ).slice(0,8);
+  if(!suggestResults.length){
+    suggestBox.innerHTML = `<div class="suggest-empty">No matching items</div>`;
+    suggestBox.hidden = false;
+    return;
+  }
+  suggestBox.innerHTML = suggestResults.map((it,i)=>{
+    const lp = pl && pl.lp[it.id] != null ? pl.lp[it.id] : 0;
+    return `<div class="suggest-item" data-idx="${i}">
+      <div><strong>${escapeHtml(it.description)}</strong></div>
+      <div class="s-code">${escapeHtml(it.partCode)} · ${escapeHtml(it.category)} · LP ${money(lp)}</div>
+    </div>`;
+  }).join("");
+  suggestBox.hidden = false;
+  $all(".suggest-item", suggestBox).forEach(el=>{
+    el.addEventListener("click", ()=> pickSuggestion(Number(el.dataset.idx)));
+  });
+});
+
+itemSearchInput.addEventListener("keydown", e=>{
+  if(suggestBox.hidden || !suggestResults.length) return;
+  if(e.key === "ArrowDown"){ e.preventDefault(); suggestIndex = Math.min(suggestIndex+1, suggestResults.length-1); highlightSuggest(); }
+  else if(e.key === "ArrowUp"){ e.preventDefault(); suggestIndex = Math.max(suggestIndex-1, 0); highlightSuggest(); }
+  else if(e.key === "Enter"){ e.preventDefault(); if(suggestIndex>=0) pickSuggestion(suggestIndex); }
+  else if(e.key === "Escape"){ suggestBox.hidden = true; }
+});
+function highlightSuggest(){
+  $all(".suggest-item", suggestBox).forEach((el,i)=> el.classList.toggle("active-suggest", i===suggestIndex));
+}
+document.addEventListener("click", e=>{
+  if(!suggestBox.contains(e.target) && e.target !== itemSearchInput) suggestBox.hidden = true;
+});
+
+function pickSuggestion(idx){
+  const it = suggestResults[idx];
+  if(!it) return;
+  const pl = db.priceLists.find(p=>p.id===draft.priceListId);
+  const lp = pl && pl.lp[it.id] != null ? pl.lp[it.id] : 0;
+  const existing = draft.items.find(x=>x.itemId===it.id);
+  if(existing){
+    existing.qty += 1;
+  } else {
+    draft.items.push({ itemId:it.id, partCode:it.partCode, description:it.description, category:it.category, lp, qty:1, discount:0 });
+  }
+  itemSearchInput.value = "";
+  suggestBox.hidden = true;
+  renderItemsTable();
+  recalcTotals();
+}
+
+function renderItemsTable(){
+  const tbody = $("#itemsTableBody");
+  tbody.innerHTML = "";
+  $("#itemsEmptyHint").style.display = draft.items.length ? "none" : "block";
+  draft.items.forEach((it, idx)=>{
+    const rate = it.lp * (1 - (it.discount||0)/100);
+    const amount = rate * it.qty;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono">${escapeHtml(it.partCode)}</td>
+      <td>${escapeHtml(it.description)}</td>
+      <td>${escapeHtml(it.category)}</td>
+      <td><input type="number" min="0" step="0.01" value="${it.lp}" data-field="lp" data-idx="${idx}"></td>
+      <td><input type="number" min="1" value="${it.qty}" data-field="qty" data-idx="${idx}"></td>
+      <td><input type="number" min="0" max="100" value="${it.discount}" data-field="discount" data-idx="${idx}"></td>
+      <td class="mono" data-role="rate">${money(rate)}</td>
+      <td class="mono" data-role="amount">${money(amount)}</td>
+      <td><button class="row-icon-btn" data-remove="${idx}" title="Remove">✕</button></td>`;
+    tbody.appendChild(tr);
+  });
+  $all("input[data-field]", tbody).forEach(inp=>{
+    // While the user is actively typing, only update the data model and the
+    // read-only rate/amount cells in this row. We deliberately do NOT rebuild
+    // the table here — recreating the <input> mid-keystroke would steal focus
+    // from it, which on mobile closes the on-screen keyboard and looks/feels
+    // like an unwanted "Enter" after just one character.
+    inp.addEventListener("input", ()=>{
+      const idx = Number(inp.dataset.idx), field = inp.dataset.field;
+      const raw = inp.value;
+      // Store the raw numeric value as typed (no clamping yet) so we never
+      // fight the user's cursor/value while they're still typing.
+      draft.items[idx][field] = raw === "" ? 0 : Number(raw);
+      const it = draft.items[idx];
+      const rate = it.lp * (1 - (it.discount||0)/100);
+      const amount = rate * it.qty;
+      const tr = inp.closest("tr");
+      tr.querySelector('[data-role="rate"]').textContent = money(rate);
+      tr.querySelector('[data-role="amount"]').textContent = money(amount);
+      recalcTotals();
+    });
+    // Once the user actually commits the field (tabs/clicks away, or presses
+    // Enter themselves), clamp the value into range and do a full,
+    // normalized re-render.
+    inp.addEventListener("change", ()=>{
+      const idx = Number(inp.dataset.idx), field = inp.dataset.field;
+      let val = Number(inp.value);
+      if(field==="qty") val = Math.max(1, val||1);
+      if(field==="discount") val = Math.min(100, Math.max(0, val||0));
+      if(field==="lp") val = Math.max(0, val||0);
+      draft.items[idx][field] = val;
+      renderItemsTable();
+      recalcTotals();
+    });
+  });
+  $all("[data-remove]", tbody).forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      draft.items.splice(Number(btn.dataset.remove),1);
+      renderItemsTable();
+      recalcTotals();
+    });
+  });
+}
+
+function renderTermsChecklist(){
+  const box = $("#termsChecklist");
+  const enabled = db.terms.filter(t=>t.enabled).sort((a,b)=>a.order-b.order);
+  box.innerHTML = enabled.map(t=>`
+    <label class="term-check">
+      <input type="checkbox" value="${t.id}" ${draft.terms.includes(t.id) ? "checked":""}>
+      <span>${escapeHtml(t.text)}</span>
+    </label>`).join("") || `<div class="empty-hint">No terms enabled — add some in Admin → Terms &amp; Conditions.</div>`;
+  $all("input[type=checkbox]", box).forEach(cb=>{
+    cb.addEventListener("change", ()=>{
+      if(cb.checked) draft.terms.push(cb.value);
+      else draft.terms = draft.terms.filter(id=>id!==cb.value);
+    });
+  });
+}
+
+function recalcTotals(){
+  const gst = db.gstRates.find(g=>g.id===draft.gstId) || {rate:0,label:"0%"};
+  let subtotal = 0;
+  draft.items.forEach(it=>{ subtotal += it.lp * (1 - (it.discount||0)/100) * it.qty; });
+  const gstAmt = subtotal * (gst.rate/100);
+  const grand = subtotal + gstAmt;
+  $("#sumSubtotal").textContent = money(subtotal);
+  $("#sumGstLabel").textContent = `GST (${gst.label})`;
+  $("#sumGst").textContent = money(gstAmt);
+  $("#sumGrand").textContent = money(grand);
+  return { subtotal, gstAmt, grand, gst };
+}
+
+function validateDraft(){
+  if(!draft.party.trim()){ toast("Please enter a party name."); return false; }
+  if(!draft.items.length){ toast("Add at least one item to the quotation."); return false; }
+  return true;
+}
+
+function persistDraft(status){
+  if(!validateDraft()) return null;
+  const totals = recalcTotals();
+  if(draft.editingId){
+    const q = db.quotations.find(x=>x.id===draft.editingId);
+    Object.assign(q, { party:draft.party, date:draft.date, priceListId:draft.priceListId,
+      gstId:draft.gstId, items:draft.items.map(i=>({...i})), terms:[...draft.terms], status });
+    return q;
+  } else {
+    const q = { id: uid("q"), number: draft.number, party:draft.party, date:draft.date,
+      priceListId:draft.priceListId, gstId:draft.gstId, items:draft.items.map(i=>({...i})),
+      terms:[...draft.terms], status };
+    db.quotations.push(q);
+    db.nextQuoteSeq++;
+    return q;
+  }
+}
+
+$("#btnSaveDraft").addEventListener("click", ()=>{
+  withLoading(()=>{
+    const q = persistDraft("draft");
+    if(q){ toast("Draft saved."); draft.editingId = q.id; renderAll(); }
+  });
+});
+$("#btnSaveQuote").addEventListener("click", ()=>{
+  withLoading(()=>{
+    const q = persistDraft("saved");
+    if(q){ toast("Quotation saved."); draft.editingId = q.id; renderAll(); navigateTo("previousQuotations"); }
+  });
+});
+
+/* --- PDF export --- */
+function buildPdf(includeFull){
+  if(!validateDraft()) return null;
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  const pl = db.priceLists.find(p=>p.id===draft.priceListId);
+  const totals = recalcTotals();
+
+  doc.setFont("helvetica","bold"); doc.setFontSize(16);
+  doc.text("Ambition Tradelink", 14, 18);
+  doc.setFont("helvetica","normal"); doc.setFontSize(9); doc.setTextColor(100);
+  doc.text("Electrical Products & Distribution Solutions", 14, 24);
+  doc.setTextColor(0);
+  doc.setFontSize(10);
+  doc.text(`Quotation No: ${draft.number}`, 14, 34);
+  doc.text(`Date: ${draft.date}`, 14, 40);
+  doc.text(`Party: ${draft.party}`, 14, 46);
+  doc.text(`Price List: ${pl ? pl.name : "-"}`, 140, 34);
+
+  const head = includeFull
+    ? [["Part Code","Description","LP","Disc %","Rate","Qty","Amount"]]
+    : [["Description","Qty","Rate","Amount"]];
+  const body = draft.items.map(it=>{
+    const rate = it.lp * (1 - (it.discount||0)/100);
+    const amount = rate * it.qty;
+    return includeFull
+      ? [it.partCode, it.description, plainMoney(it.lp), (it.discount||0)+"%", plainMoney(rate), it.qty, plainMoney(amount)]
+      : [it.description, it.qty, plainMoney(rate), plainMoney(amount)];
+  });
+
+  doc.autoTable({
+    head, body, startY: 54, styles:{ fontSize:9, cellPadding:3 },
+    headStyles:{ fillColor:[190,106,52], textColor:255 },
+    columnStyles: includeFull ? { 1:{cellWidth:50} } : { 0:{cellWidth:90} },
+  });
+
+  let y = doc.lastAutoTable.finalY + 8;
+  doc.setFontSize(10);
+  doc.text(`Subtotal: ${plainMoney(totals.subtotal)}`, 140, y); y += 6;
+  doc.text(`${totals.gst.label} GST: ${plainMoney(totals.gstAmt)}`, 140, y); y += 6;
+  doc.setFont("helvetica","bold");
+  doc.text(`Grand Total: ${plainMoney(totals.grand)}`, 140, y); y += 10;
+  doc.setFont("helvetica","normal");
+
+  const enabledTerms = db.terms.filter(t=> draft.terms.includes(t.id)).sort((a,b)=>a.order-b.order);
+  if(enabledTerms.length){
+    doc.setFontSize(10); doc.setFont("helvetica","bold");
+    doc.text("Terms & Conditions", 14, y); y += 6;
+    doc.setFont("helvetica","normal"); doc.setFontSize(9);
+    enabledTerms.forEach(t=>{
+      doc.text(`• ${t.text}`, 16, y);
+      y += 5;
+    });
+  }
+  return doc;
+}
+
+$("#btnPdfOpt1").addEventListener("click", ()=> withLoading(()=>{
+  const doc = buildPdf(true);
+  if(doc){ doc.save(`${draft.number}-full.pdf`); toast("Full PDF exported."); }
+}));
+$("#btnPdfOpt2").addEventListener("click", ()=> withLoading(()=>{
+  const doc = buildPdf(false);
+  if(doc){ doc.save(`${draft.number}-simple.pdf`); toast("Simple PDF exported."); }
+}));
+
+/* --- Excel export --- */
+function buildWorkbook(includeFull){
+  if(!validateDraft()) return null;
+  const pl = db.priceLists.find(p=>p.id===draft.priceListId);
+  const totals = recalcTotals();
+  const rows = [];
+  rows.push(["Ambition Tradelink"]);
+  rows.push([`Quotation No: ${draft.number}`, "", `Date: ${draft.date}`]);
+  rows.push([`Party: ${draft.party}`, "", `Price List: ${pl ? pl.name : "-"}`]);
+  rows.push([]);
+  const header = includeFull
+    ? ["Part Code","Description","Category","LP","Discount %","Final Rate","Qty","Amount"]
+    : ["Description","Qty","Final Rate","Amount"];
+  rows.push(header);
+  draft.items.forEach(it=>{
+    const rate = it.lp * (1 - (it.discount||0)/100);
+    const amount = rate * it.qty;
+    rows.push(includeFull
+      ? [it.partCode, it.description, it.category, it.lp, it.discount||0, Number(rate.toFixed(2)), it.qty, Number(amount.toFixed(2))]
+      : [it.description, it.qty, Number(rate.toFixed(2)), Number(amount.toFixed(2))]);
+  });
+  rows.push([]);
+  rows.push(["", "", "", "Subtotal", Number(totals.subtotal.toFixed(2))]);
+  rows.push(["", "", "", `GST (${totals.gst.label})`, Number(totals.gstAmt.toFixed(2))]);
+  rows.push(["", "", "", "Grand Total", Number(totals.grand.toFixed(2))]);
+
+  const enabledTerms = db.terms.filter(t=> draft.terms.includes(t.id)).sort((a,b)=>a.order-b.order);
+  if(enabledTerms.length){
+    rows.push([]);
+    rows.push(["Terms & Conditions"]);
+    enabledTerms.forEach(t=> rows.push([t.text]));
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = includeFull
+    ? [{wch:14},{wch:32},{wch:14},{wch:10},{wch:10},{wch:12},{wch:8},{wch:12}]
+    : [{wch:36},{wch:8},{wch:12},{wch:12}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Quotation");
+  return wb;
+}
+
+$("#btnXlsOpt1").addEventListener("click", ()=> withLoading(()=>{
+  const wb = buildWorkbook(true);
+  if(wb){ XLSX.writeFile(wb, `${draft.number}-full.xlsx`); toast("Full Excel exported."); }
+}));
+$("#btnXlsOpt2").addEventListener("click", ()=> withLoading(()=>{
+  const wb = buildWorkbook(false);
+  if(wb){ XLSX.writeFile(wb, `${draft.number}-simple.xlsx`); toast("Simple Excel exported."); }
+}));
+
+/* --- copy quotation as text --- */
+$("#btnCopyQuote").addEventListener("click", ()=>{
+  if(!validateDraft()) return;
+  const totals = recalcTotals();
+  const pl = db.priceLists.find(p=>p.id===draft.priceListId);
+  let lines = [];
+  lines.push(`*Quotation ${draft.number}*`);
+  lines.push(`Party: ${draft.party}`);
+  lines.push(`Date: ${draft.date}`);
+  lines.push(`Price List: ${pl ? pl.name : "-"}`);
+  lines.push("");
+  draft.items.forEach((it,i)=>{
+    const rate = it.lp * (1 - (it.discount||0)/100);
+    const amount = rate * it.qty;
+    lines.push(`${i+1}. ${it.description} — Qty ${it.qty} x ${money(rate)} = ${money(amount)}`);
+  });
+  lines.push("");
+  lines.push(`Subtotal: ${money(totals.subtotal)}`);
+  lines.push(`GST (${totals.gst.label}): ${money(totals.gstAmt)}`);
+  lines.push(`*Grand Total: ${money(totals.grand)}*`);
+  const enabledTerms = db.terms.filter(t=> draft.terms.includes(t.id)).sort((a,b)=>a.order-b.order);
+  if(enabledTerms.length){
+    lines.push("");
+    lines.push("Terms & Conditions:");
+    enabledTerms.forEach(t=> lines.push(`- ${t.text}`));
+  }
+  const text = lines.join("\n");
+  navigator.clipboard.writeText(text).then(()=>{
+    toast("Quotation copied — paste it into WhatsApp, email, or SMS.");
+  }).catch(()=>{
+    toast("Could not access clipboard. Select and copy manually.");
+  });
+});
+
+/* ---------------- PREVIOUS QUOTATIONS ---------------- */
+
+function renderQuotationsTable(){
+  saveDB();
+  const search = ($("#quoteSearch").value || "").toLowerCase();
+  const tbody = $("#allQuotesTable tbody");
+  tbody.innerHTML = "";
+  const list = [...db.quotations]
+    .filter(q => !search || q.party.toLowerCase().includes(search) || q.number.toLowerCase().includes(search) || q.date.includes(search))
+    .sort((a,b)=> b.date.localeCompare(a.date));
+  if(!list.length){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No quotations match your search.</td></tr>`;
+    return;
+  }
+  list.forEach(q=>{
+    const t = quoteTotal(q);
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono">${q.number}</td>
+      <td>${escapeHtml(q.party)}</td>
+      <td class="mono">${q.date}</td>
+      <td>${q.items.length}</td>
+      <td class="mono">${money(t.grand)}</td>
+      <td><span class="status-badge ${q.status}">${q.status}</span></td>
+      <td class="quote-row-actions">
+        <button class="btn btn-ghost btn-sm" data-act="view">View/Edit</button>
+        <button class="btn btn-ghost btn-sm" data-act="dup">Duplicate</button>
+        <button class="btn btn-ghost btn-sm" data-act="pdf">PDF</button>
+        <button class="btn btn-ghost btn-sm" data-act="xls">Excel</button>
+        <button class="row-icon-btn admin-only" data-act="del" title="Delete">✕</button>
+      </td>`;
+    $all("[data-act]", tr).forEach(btn=>{
+      btn.addEventListener("click", ()=> handleQuoteAction(btn.dataset.act, q.id));
+    });
+    tbody.appendChild(tr);
+  });
+}
+$("#quoteSearch").addEventListener("input", renderQuotationsTable);
+
+async function handleQuoteAction(action, id){
+  const q = db.quotations.find(x=>x.id===id);
+  if(!q) return;
+  if(action === "view"){ openQuotation(id); }
+  else if(action === "dup"){
+    const copy = { ...q, id: uid("q"), number: "QTN-" + db.nextQuoteSeq, status:"draft",
+      items:q.items.map(i=>({...i})), terms:[...q.terms], date:new Date().toISOString().slice(0,10) };
+    db.nextQuoteSeq++;
+    db.quotations.push(copy);
+    toast(`Duplicated as ${copy.number}.`);
+    renderQuotationsTable();
+    renderDashboard();
+  }
+  else if(action === "pdf"){
+    draft = { editingId:q.id, number:q.number, party:q.party, date:q.date, priceListId:q.priceListId, gstId:q.gstId, items:q.items.map(i=>({...i})), terms:[...q.terms] };
+    withLoading(()=>{ const doc = buildPdf(true); if(doc) doc.save(`${q.number}.pdf`); });
+  }
+  else if(action === "xls"){
+    draft = { editingId:q.id, number:q.number, party:q.party, date:q.date, priceListId:q.priceListId, gstId:q.gstId, items:q.items.map(i=>({...i})), terms:[...q.terms] };
+    withLoading(()=>{ const wb = buildWorkbook(true); if(wb) XLSX.writeFile(wb, `${q.number}.xlsx`); });
+  }
+  else if(action === "del"){
+    if(session.user.role !== "admin"){ toast("Only admins can delete quotations."); return; }
+    const ok = await confirmDialog("Delete quotation?", `This will permanently remove ${q.number}.`);
+    if(ok){
+      db.quotations = db.quotations.filter(x=>x.id!==id);
+      toast("Quotation deleted.");
+      renderQuotationsTable();
+      renderDashboard();
+    }
+  }
+}
+
+/* ---------------- REPORTS ---------------- */
+
+function renderReports(){
+  saveDB();
+  const total = db.quotations.length;
+  const totalValue = db.quotations.reduce((s,q)=> s + quoteTotal(q).grand, 0);
+  $("#repTotalQuotes").textContent = total;
+  $("#repTotalValue").textContent = plainMoney(totalValue);
+  $("#repAvgValue").textContent = plainMoney(total ? totalValue/total : 0);
+
+  const byParty = {};
+  db.quotations.forEach(q=>{
+    const t = quoteTotal(q).grand;
+    if(!byParty[q.party]) byParty[q.party] = { count:0, value:0 };
+    byParty[q.party].count++;
+    byParty[q.party].value += t;
+  });
+  const rows = Object.entries(byParty).sort((a,b)=> b[1].value - a[1].value);
+  const tbody = $("#topPartiesTable tbody");
+  tbody.innerHTML = rows.length ? rows.map(([party, d])=>
+    `<tr><td>${escapeHtml(party)}</td><td>${d.count}</td><td class="mono">${money(d.value)}</td></tr>`).join("")
+    : `<tr class="empty-row"><td colspan="3">No data yet.</td></tr>`;
+}
+
+/* ---------------- ADMIN: PRICE LISTS ---------------- */
+
+function renderPriceLists(){
+  saveDB();
+  const tbody = $("#priceListsTable tbody");
+  tbody.innerHTML = db.priceLists.map(p=>{
+    const count = Object.keys(p.lp).length;
+    return `<tr>
+      <td>${escapeHtml(p.name)}</td>
+      <td>${count}</td>
+      <td><span class="status-badge ${p.status}">${p.status}</span></td>
+      <td class="mono">${p.created}</td>
+      <td class="quote-row-actions">
+        <button class="btn btn-ghost btn-sm" data-act="manage" data-id="${p.id}">Manage Prices</button>
+        ${p.status!=="archived" ? `<button class="btn btn-ghost btn-sm" data-act="toggle" data-id="${p.id}">${p.status==="active"?"Deactivate":"Activate"}</button>` : ""}
+        ${p.status!=="archived" ? `<button class="btn btn-ghost btn-sm" data-act="archive" data-id="${p.id}">Archive</button>` : `<button class="btn btn-ghost btn-sm" data-act="unarchive" data-id="${p.id}">Unarchive</button>`}
+        <button class="row-icon-btn" data-act="del" data-id="${p.id}" title="Delete">✕</button>
+      </td>
+    </tr>`;
+  }).join("") || `<tr class="empty-row"><td colspan="5">No price lists yet.</td></tr>`;
+
+  $all("[data-act]", tbody).forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      const id = btn.dataset.id;
+      const p = db.priceLists.find(x=>x.id===id);
+      if(btn.dataset.act === "manage"){ openPriceListDetail(id); }
+      else if(btn.dataset.act === "toggle"){ p.status = p.status === "active" ? "inactive" : "active"; renderPriceLists(); renderDashboard(); }
+      else if(btn.dataset.act === "archive"){ p.status = "archived"; renderPriceLists(); renderDashboard(); }
+      else if(btn.dataset.act === "unarchive"){ p.status = "active"; renderPriceLists(); refreshUploadTargets(); renderDashboard(); toast("Price list unarchived."); }
+      else if(btn.dataset.act === "del"){
+        const ok = await confirmDialog("Delete price list?", `This removes "${p.name}" permanently.`);
+        if(ok){
+          db.priceLists = db.priceLists.filter(x=>x.id!==id);
+          db.quotations.forEach(q=>{ if(q.priceListId===id) q.priceListId = null; });
+          renderPriceLists(); refreshUploadTargets(); renderDashboard(); toast("Price list deleted.");
+        }
+      }
+    });
+  });
+  refreshUploadTargets();
+}
+
+function refreshUploadTargets(){
+  const sel = $("#uploadTargetList");
+  const options = db.priceLists.filter(p=>p.status!=="archived").map(p=> `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+  sel.innerHTML = `<option value="__new__">+ Create new price list from this file…</option>` + options;
+}
+
+$("#btnNewPriceList").addEventListener("click", async ()=>{
+  const name = prompt("New price list name (e.g. Price List May 2026):");
+  if(!name) return;
+  const pl = { id: uid("pl"), name: name.trim(), status:"active", created: new Date().toISOString().slice(0,10), lp:{} };
+  db.itemMaster.forEach(it=> pl.lp[it.id] = 0);
+  db.priceLists.push(pl);
+  renderPriceLists();
+  renderDashboard();
+  toast("Price list created.");
+});
+
+$("#priceListUpload").addEventListener("change", e=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const targetId = $("#uploadTargetList").value;
+  let pl;
+  if(targetId === "__new__"){
+    const suggested = file.name.replace(/\.(xlsx|xls)$/i, "").replace(/[_-]+/g, " ").trim();
+    const name = prompt("Name for the new price list:", suggested);
+    if(!name){ e.target.value = ""; return; }
+    pl = { id: uid("pl"), name: name.trim(), status:"active", created: new Date().toISOString().slice(0,10), lp:{} };
+    db.priceLists.push(pl);
+  } else {
+    pl = db.priceLists.find(p=>p.id===targetId);
+  }
+  if(!pl){ toast("Select a price list to upload into first."); return; }
+  showLoading(true);
+  const reader = new FileReader();
+  reader.onload = evt=>{
+    try{
+      const wb = XLSX.read(evt.target.result, { type:"array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval:"" });
+      let updated = 0, added = 0;
+      rows.forEach(row=>{
+        const partCode = String(row.PartCode || row["Part Code"] || row.partCode || row["Product Reference"] || row.ProductReference || row.SKU || row.Code || "").trim();
+        const description = String(row.Description || row.description || "").trim();
+        const lp = Number(row.LP || row.lp || row.Price || row.MRP || row.mrp || 0);
+        const category = String(row.Category || row.category || "General").trim();
+        if(!partCode) return;
+        let item = db.itemMaster.find(i=> i.partCode.toLowerCase() === partCode.toLowerCase());
+        if(!item){
+          item = { id: uid("i"), partCode, description: description||partCode, category, status:"active" };
+          db.itemMaster.push(item);
+          added++;
+        } else {
+          updated++;
+        }
+        pl.lp[item.id] = lp;
+      });
+      toast(`"${pl.name}" — ${updated} items refreshed, ${added} new items added.`);
+      renderPriceLists();
+      renderItemMaster();
+      renderDashboard();
+      refreshUploadTargets();
+    }catch(err){
+      toast("Could not read that file. Expected columns: PartCode (or Product Reference), Description, LP (or MRP), Category.");
+    }
+    showLoading(false);
+    e.target.value = "";
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+/* ---------------- PRICE LIST DETAIL (manual add/edit LP per item) ---------------- */
+
+let plDetailId = null;
+
+function openPriceListDetail(id){
+  plDetailId = id;
+  navigateTo("priceListDetail");
+  $("#plDetailAddForm").reset();
+  $("#plDetailSearch").value = "";
+  renderPriceListDetail();
+}
+
+function renderPriceListDetail(){
+  const pl = db.priceLists.find(p=>p.id===plDetailId);
+  if(!pl){ navigateTo("priceLists"); return; }
+  $("#plDetailTitle").textContent = `Manage Prices — ${pl.name}`;
+  $("#viewTitle").textContent = `Manage Prices — ${pl.name}`;
+  const search = ($("#plDetailSearch").value || "").toLowerCase();
+  const tbody = $("#plDetailTable tbody");
+  const list = db.itemMaster.filter(it=> !search || it.description.toLowerCase().includes(search) || it.partCode.toLowerCase().includes(search));
+  tbody.innerHTML = list.map(it=> `
+    <tr>
+      <td class="mono">${escapeHtml(it.partCode)}</td>
+      <td>${escapeHtml(it.description)}</td>
+      <td>${escapeHtml(it.category)}</td>
+      <td><input type="number" step="0.01" class="pl-lp-input" data-item="${it.id}" value="${pl.lp[it.id] != null ? pl.lp[it.id] : 0}"></td>
+    </tr>`).join("") || `<tr class="empty-row"><td colspan="4">No items yet — add one above.</td></tr>`;
+
+  $all(".pl-lp-input", tbody).forEach(inp=>{
+    inp.addEventListener("change", ()=>{
+      pl.lp[inp.dataset.item] = Number(inp.value) || 0;
+      renderPriceLists();
+      toast("Price saved.");
+    });
+  });
+}
+
+$("#plDetailSearch").addEventListener("input", renderPriceListDetail);
+$("#btnBackToPriceLists").addEventListener("click", ()=> navigateTo("priceLists"));
+
+$("#plDetailAddForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  const pl = db.priceLists.find(p=>p.id===plDetailId);
+  if(!pl) return;
+  const partCode = $("#plaPartCode").value.trim();
+  const description = $("#plaDescription").value.trim();
+  const category = $("#plaCategory").value.trim();
+  const lp = Number($("#plaLP").value) || 0;
+  let item = db.itemMaster.find(i=> i.partCode.toLowerCase() === partCode.toLowerCase());
+  if(!item){
+    item = { id: uid("i"), partCode, description, category, status:"active" };
+    db.itemMaster.push(item);
+    toast(`"${partCode}" added to Item Master and priced in "${pl.name}".`);
+  } else {
+    toast(`Price for "${partCode}" set in "${pl.name}".`);
+  }
+  pl.lp[item.id] = lp;
+  e.target.reset();
+  renderPriceListDetail();
+  renderPriceLists();
+  renderItemMaster();
+  renderDashboard();
+});
+
+/* ---------------- ADMIN: ITEM MASTER ---------------- */
+
+function renderItemMaster(){
+  saveDB();
+  const search = ($("#itemMasterSearch").value || "").toLowerCase();
+  const tbody = $("#itemMasterTable tbody");
+  const list = db.itemMaster.filter(it=> !search || it.description.toLowerCase().includes(search) || it.partCode.toLowerCase().includes(search));
+  tbody.innerHTML = list.map(it=> `
+    <tr>
+      <td class="mono">${escapeHtml(it.partCode)}</td>
+      <td>${escapeHtml(it.description)}</td>
+      <td>${escapeHtml(it.category)}</td>
+      <td class="mono">${money(it.lp != null ? it.lp : (db.priceLists.find(p=>p.status==='active')?.lp[it.id] || 0))}</td>
+      <td><span class="status-badge ${it.status}">${it.status}</span></td>
+      <td>
+        <button class="row-icon-btn edit" data-edit="${it.id}" title="Edit">✎</button>
+        <button class="row-icon-btn" data-del="${it.id}" title="Delete">✕</button>
+      </td>
+    </tr>`).join("") || `<tr class="empty-row"><td colspan="6">No items found.</td></tr>`;
+
+  $all("[data-edit]", tbody).forEach(btn=> btn.addEventListener("click", ()=> editItemMaster(btn.dataset.edit)));
+  $all("[data-del]", tbody).forEach(btn=> btn.addEventListener("click", async ()=>{
+    const ok = await confirmDialog("Delete item?", "This removes it from the item master and all price lists.");
+    if(ok){
+      db.itemMaster = db.itemMaster.filter(i=>i.id!==btn.dataset.del);
+      db.priceLists.forEach(p=> delete p.lp[btn.dataset.del]);
+      renderItemMaster();
+      renderDashboard();
+      toast("Item deleted.");
+    }
+  }));
+}
+$("#itemMasterSearch").addEventListener("input", renderItemMaster);
+
+function editItemMaster(id){
+  const it = db.itemMaster.find(x=>x.id===id);
+  if(!it) return;
+  $("#imEditId").value = it.id;
+  $("#imPartCode").value = it.partCode;
+  $("#imDescription").value = it.description;
+  $("#imCategory").value = it.category;
+  const activePl = db.priceLists.find(p=>p.status==="active");
+  $("#imLP").value = activePl ? (activePl.lp[it.id] || 0) : 0;
+  $("#imStatus").value = it.status;
+  $("#imSubmitBtn").textContent = "Update Item";
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+$("#itemMasterForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  const id = $("#imEditId").value;
+  const partCode = $("#imPartCode").value.trim();
+  const description = $("#imDescription").value.trim();
+  const category = $("#imCategory").value.trim();
+  const lp = Number($("#imLP").value);
+  const status = $("#imStatus").value;
+  if(id){
+    const it = db.itemMaster.find(x=>x.id===id);
+    Object.assign(it, { partCode, description, category, status });
+    const activePl = db.priceLists.find(p=>p.status==="active");
+    if(activePl) activePl.lp[id] = lp;
+    toast("Item updated.");
+  } else {
+    const it = { id: uid("i"), partCode, description, category, status };
+    db.itemMaster.push(it);
+    db.priceLists.forEach(p=> p.lp[it.id] = p.status==="active" ? lp : 0);
+    toast("Item added.");
+  }
+  e.target.reset();
+  $("#imEditId").value = "";
+  $("#imSubmitBtn").textContent = "Add Item";
+  renderItemMaster();
+  renderDashboard();
+});
+
+/* ---------------- ADMIN: GST SETTINGS ---------------- */
+
+function renderGstSettings(){
+  saveDB();
+  const tbody = $("#gstTable tbody");
+  tbody.innerHTML = db.gstRates.map(g=> `
+    <tr>
+      <td>${escapeHtml(g.label)}</td>
+      <td class="mono">${g.rate}%</td>
+      <td>${g.isDefault ? '<span class="status-badge active">Default</span>' : ""}</td>
+      <td>
+        <button class="row-icon-btn edit" data-edit="${g.id}" title="Edit">✎</button>
+        <button class="row-icon-btn" data-del="${g.id}" title="Delete">✕</button>
+      </td>
+    </tr>`).join("") || `<tr class="empty-row"><td colspan="4">No GST rates yet.</td></tr>`;
+
+  $all("[data-edit]", tbody).forEach(btn=> btn.addEventListener("click", ()=>{
+    const g = db.gstRates.find(x=>x.id===btn.dataset.edit);
+    $("#gstEditId").value = g.id;
+    $("#gstLabel").value = g.label;
+    $("#gstRate").value = g.rate;
+    $("#gstDefault").checked = g.isDefault;
+    $("#gstSubmitBtn").textContent = "Update Rate";
+  }));
+  $all("[data-del]", tbody).forEach(btn=> btn.addEventListener("click", async ()=>{
+    const ok = await confirmDialog("Delete GST rate?", "Quotations already using this rate keep their saved value.");
+    if(ok){
+      db.gstRates = db.gstRates.filter(x=>x.id!==btn.dataset.del);
+      db.quotations.forEach(q=>{ if(q.gstId===btn.dataset.del) q.gstId = null; });
+      renderGstSettings(); toast("GST rate deleted.");
+    }
+  }));
+}
+
+$("#gstForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  const id = $("#gstEditId").value;
+  const label = $("#gstLabel").value.trim();
+  const rate = Number($("#gstRate").value);
+  const isDefault = $("#gstDefault").checked;
+  if(isDefault) db.gstRates.forEach(g=> g.isDefault=false);
+  if(id){
+    const g = db.gstRates.find(x=>x.id===id);
+    Object.assign(g, { label, rate, isDefault });
+    toast("GST rate updated.");
+  } else {
+    db.gstRates.push({ id: uid("g"), label, rate, isDefault });
+    toast("GST rate added.");
+  }
+  e.target.reset();
+  $("#gstEditId").value = "";
+  $("#gstSubmitBtn").textContent = "Add GST Rate";
+  renderGstSettings();
+});
+
+/* ---------------- ADMIN: TERMS & CONDITIONS ---------------- */
+
+function renderTerms(){
+  saveDB();
+  const tbody = $("#termsTable tbody");
+  const sorted = [...db.terms].sort((a,b)=>a.order-b.order);
+  tbody.innerHTML = sorted.map((t,i)=> `
+    <tr>
+      <td class="mono">${i+1}</td>
+      <td>${escapeHtml(t.text)}</td>
+      <td><button class="btn btn-ghost btn-sm" data-toggle="${t.id}"><span class="status-badge ${t.enabled?"active":"inactive"}">${t.enabled?"Enabled":"Disabled"}</span></button></td>
+      <td>
+        <button class="row-icon-btn" data-up="${t.id}" title="Move up">↑</button>
+        <button class="row-icon-btn" data-down="${t.id}" title="Move down">↓</button>
+      </td>
+      <td>
+        <button class="row-icon-btn edit" data-edit="${t.id}" title="Edit">✎</button>
+        <button class="row-icon-btn" data-del="${t.id}" title="Delete">✕</button>
+      </td>
+    </tr>`).join("") || `<tr class="empty-row"><td colspan="5">No terms yet.</td></tr>`;
+
+  $all("[data-toggle]", tbody).forEach(btn=> btn.addEventListener("click", ()=>{
+    const t = db.terms.find(x=>x.id===btn.dataset.toggle); t.enabled = !t.enabled; renderTerms();
+  }));
+  $all("[data-up]", tbody).forEach(btn=> btn.addEventListener("click", ()=> reorderTerm(btn.dataset.up, -1)));
+  $all("[data-down]", tbody).forEach(btn=> btn.addEventListener("click", ()=> reorderTerm(btn.dataset.down, 1)));
+  $all("[data-edit]", tbody).forEach(btn=> btn.addEventListener("click", ()=>{
+    const t = db.terms.find(x=>x.id===btn.dataset.edit);
+    $("#termEditId").value = t.id;
+    $("#termText").value = t.text;
+    $("#termSubmitBtn").textContent = "Update Term";
+  }));
+  $all("[data-del]", tbody).forEach(btn=> btn.addEventListener("click", async ()=>{
+    const ok = await confirmDialog("Delete term?", "This removes it from the list shown when creating quotations.");
+    if(ok){ db.terms = db.terms.filter(x=>x.id!==btn.dataset.del); renderTerms(); toast("Term deleted."); }
+  }));
+}
+
+function reorderTerm(id, dir){
+  const sorted = [...db.terms].sort((a,b)=>a.order-b.order);
+  const idx = sorted.findIndex(t=>t.id===id);
+  const swapIdx = idx + dir;
+  if(swapIdx < 0 || swapIdx >= sorted.length) return;
+  const a = sorted[idx], b = sorted[swapIdx];
+  const tmp = a.order; a.order = b.order; b.order = tmp;
+  renderTerms();
+}
+
+$("#termsForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  const id = $("#termEditId").value;
+  const text = $("#termText").value.trim();
+  if(id){
+    const t = db.terms.find(x=>x.id===id);
+    t.text = text;
+    toast("Term updated.");
+  } else {
+    const maxOrder = db.terms.reduce((m,t)=> Math.max(m,t.order), 0);
+    db.terms.push({ id: uid("t"), text, enabled:true, order:maxOrder+1 });
+    toast("Term added.");
+  }
+  e.target.reset();
+  $("#termEditId").value = "";
+  $("#termSubmitBtn").textContent = "Add Term";
+  renderTerms();
+});
+
+/* ---------------- ADMIN: USER MANAGEMENT ---------------- */
+
+function renderUsers(){
+  saveDB();
+  const tbody = $("#usersTable tbody");
+  tbody.innerHTML = db.users.map(u=> `
+    <tr>
+      <td class="mono">${escapeHtml(u.username)}</td>
+      <td style="text-transform:capitalize">${u.role}</td>
+      <td><button class="btn btn-ghost btn-sm" data-toggle="${u.id}"><span class="status-badge ${u.status}">${u.status}</span></button></td>
+      <td>
+        <button class="row-icon-btn edit" data-reset="${u.id}" title="Reset password">⟲</button>
+        <button class="row-icon-btn" data-del="${u.id}" title="Delete">✕</button>
+      </td>
+    </tr>`).join("");
+
+  $all("[data-toggle]", tbody).forEach(btn=> btn.addEventListener("click", ()=>{
+    const u = db.users.find(x=>x.id===btn.dataset.toggle);
+    u.status = u.status === "active" ? "disabled" : "active";
+    renderUsers();
+  }));
+  $all("[data-reset]", tbody).forEach(btn=> btn.addEventListener("click", ()=>{
+    const u = db.users.find(x=>x.id===btn.dataset.reset);
+    const newPass = prompt(`New password for ${u.username}:`, "changeme123");
+    if(newPass){ u.password = newPass; toast(`Password reset for ${u.username}.`); }
+  }));
+  $all("[data-del]", tbody).forEach(btn=> btn.addEventListener("click", async ()=>{
+    const u = db.users.find(x=>x.id===btn.dataset.del);
+    if(u.username === session.user.username){ toast("You can't delete the account you're signed in with."); return; }
+    const ok = await confirmDialog("Delete user?", `Remove ${u.username} permanently.`);
+    if(ok){ db.users = db.users.filter(x=>x.id!==u.id); renderUsers(); toast("User deleted."); }
+  }));
+}
+
+$("#userForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  const username = $("#userUsername").value.trim();
+  const password = $("#userPassword").value;
+  const role = $("#userRole").value;
+  if(db.users.some(u=>u.username===username)){ toast("That username already exists."); return; }
+  db.users.push({ id: uid("u"), username, password, role, status:"active" });
+  toast("User added.");
+  e.target.reset();
+  renderUsers();
+});
+
+/* ---------------- INIT ---------------- */
+
+function renderAll(){
+  renderDashboard();
+}
+
+// Set default date field for login screen date pickers etc. not needed further.
+
+})();
+
+</script>
+</body>
+</html>
